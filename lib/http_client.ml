@@ -54,7 +54,10 @@ let headers =
   in
   go []
 
-let chunked_body =
+(* A parser carries state, so these are functions, not values: a top-level
+   parser value holding a Buffer would let one response's bytes bleed into the
+   next one parsed by the same process. *)
+let chunked_body () =
   let out = Buffer.create 1024 in
   let rec go () =
     let* size_line = line in
@@ -64,7 +67,18 @@ let chunked_body =
       | None -> size_line
     in
     let n = try int_of_string ("0x" ^ String.trim size_field) with _ -> 0 in
-    if n = 0 then Eio.Buf_read.return (Buffer.contents out)
+    if n = 0 then
+      (* The terminating chunk is "0" and the trailer section ends with an
+         empty line.  Leaving that line unread is what makes the whole reply
+         parse as "unexpected data after parsing" on the first chunked (i.e.
+         streaming) response.  A server that closes right at the zero chunk
+         without the trailer line is tolerated, not failed on. *)
+      let* next = Eio.Buf_read.peek_char in
+      match next with
+      | None -> Eio.Buf_read.return (Buffer.contents out)
+      | Some _ ->
+          let* _trailer_end = line in
+          Eio.Buf_read.return (Buffer.contents out)
     else
       let* chunk = Eio.Buf_read.take n in
       let* _crlf = line in
@@ -73,12 +87,12 @@ let chunked_body =
   in
   go ()
 
-let response =
+let response () =
   let* status_line = line in
   let* hs = headers in
   let* body =
     match header_value hs "transfer-encoding" with
-    | Some te when String.lowercase_ascii te = "chunked" -> chunked_body
+    | Some te when String.lowercase_ascii te = "chunked" -> chunked_body ()
     | _ -> (
         match header_value hs "content-length" with
         | Some cl -> (
@@ -132,7 +146,7 @@ let request ~env ~sw ?(headers = []) ?body ~meth ~url () =
                  with EOF: the request is never seen.  So: no half-close on TLS,
                  where "connection: close" already ends the exchange. *)
               if half_close then Eio.Flow.shutdown flow `Send;
-              Eio.Buf_read.parse_exn ~max_size:(32 * 1024 * 1024) response flow
+              Eio.Buf_read.parse_exn ~max_size:(32 * 1024 * 1024) (response ()) flow
             in
             let status, body =
               if scheme = "https" then
@@ -149,3 +163,8 @@ let request ~env ~sw ?(headers = []) ?body ~meth ~url () =
             in
             Ok (status, body)
           with exn -> Error (Printf.sprintf "%s: %s" host (Printexc.to_string exn))))
+
+(* A testable seam: parse a whole response out of a string, so the framing
+   rules (content-length, chunked, and the terminating chunk's trailer line)
+   have a regression test that does not need a socket. *)
+let parse_response_string (s : string) = Eio.Buf_read.parse_string (response ()) s

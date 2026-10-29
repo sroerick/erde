@@ -710,6 +710,33 @@ let test_stream_request_flags () =
   Alcotest.(check bool) "and not when not streaming" false
     (match Config.field "stream" c with Some _ -> true | None -> false)
 
+
+(* ---------- http framing ---------- *)
+
+let test_content_length_response () =
+  match Http_client.parse_response_string "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello" with
+  | Error (`Msg m) -> Alcotest.fail m
+  | Ok (status, body) ->
+      Alcotest.(check int) "status" 200 status;
+      Alcotest.(check string) "body" "hello" body
+
+let test_chunked_response_consumes_its_trailer () =
+  let raw =
+    "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+  in
+  match Http_client.parse_response_string raw with
+  | Error (`Msg m) -> Alcotest.fail m
+  | Ok (status, body) ->
+      Alcotest.(check int) "status" 200 status;
+      Alcotest.(check string) "chunks joined" "hello world" body
+
+let test_chunked_response_without_trailer_line () =
+  (* some servers end the stream at the zero chunk; that must not hang or fail *)
+  let raw = "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n" in
+  match Http_client.parse_response_string raw with
+  | Error (`Msg m) -> Alcotest.fail m
+  | Ok (_, body) -> Alcotest.(check string) "chunks joined" "abc" body
+
 let () =
   Alcotest.run "erde"
     [
@@ -773,6 +800,14 @@ let () =
           Alcotest.test_case "granted means attempted" `Quick
             test_tool_gate_passes_then_the_authority_is_reached;
           Alcotest.test_case "schemas match the wire" `Quick test_schemas_are_wire_shaped;
+        ] );
+      ( "http",
+        [
+          Alcotest.test_case "content-length framing" `Quick test_content_length_response;
+          Alcotest.test_case "chunked framing eats its trailer" `Quick
+            test_chunked_response_consumes_its_trailer;
+          Alcotest.test_case "a zero chunk with no trailer line" `Quick
+            test_chunked_response_without_trailer_line;
         ] );
       ( "stream",
         [

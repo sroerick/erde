@@ -36,7 +36,9 @@ from that document.
 - `lib/tools.ml` -- the tool host: `tree.get`, `tree.list`, `tree.put`, plus a
   local `echo` for tests, each gated before anything leaves the process, each
   described to the model in the shape its wire expects.  Arguments are typed
-  JSON; nothing builds a shell string.
+  JSON; nothing builds a shell string.  `Wire.assemble_stream` folds either
+  provider's transcript into the same response record, tool-call fragments
+  included, and a streaming request asks for usage in the final chunk.
 - `lib/journal.ml` -- append-only JSONL rows carrying provider, cache
   counters, cost and route reason, with `tool` rows for each tool decision and
   `verdict` rows that correct an earlier row by reference.  `hit_rates`
@@ -47,6 +49,13 @@ from that document.
 - `lib/schedule.ml` -- order the work by cache locality rather than readiness:
   group by (provider, prefix), run a group inside one TTL window so the first
   call writes and the rest read, and give an uncacheable prefix its own lane.
+- `lib/prompt.ml` -- the one place a prompt is assembled, as a pure function of
+  (policy revision, tools revision, claims, project, task).  Change one claim
+  and the prefix hash changes, which is exactly the cache boundary.
+- `lib/schedule.ml` -- order the work by cache locality rather than readiness:
+  group by (provider, prefix), run a group inside one TTL window so the first
+  call writes and the rest read, give an uncacheable prefix its own lane, and
+  report what the ordering bought.
 - `lib/http_client.ml` -- one request, one response, TLS via the system CA
   store.
 - `bin/erde.ml` -- `providers`, `plan`, `claims`, `tool`, `turn`, `journal`,
@@ -72,18 +81,22 @@ env file, the process environment, or a mode-600 file of your own.
 
 ## Verified
 
-- 31 alcotest cases, `dune build` green.
+- 38 alcotest cases, `dune build` green.
 - Live HTTPS GET to `api.openai.com/v1/models` returns 401 with the
   provider's JSON error body.
 - Live POST to `api.anthropic.com` with a deliberately bad key returns 401 and
   writes a journal row carrying provider, prefix hash, route reason and status.
 - Live `whoami` against `https://tuna.town` with an identity bearer.
 - A gated `tree.get` on a path outside every grant is refused before any
-  request is sent, and the refusal is a journal row.
+  request is sent, and the refusal is a journal row; a `tree.put` with no grant
+  row is refused the same way.
+- Claim density, measured on the live garden: `cited` 343 prefix tokens,
+  `trunc60` 467, `full` 17,679 (51x).
 
 ## Next (from the design)
 
-SSE streaming with tool-call deferral; fetching the identity's claims into the
-turn prefix (the `claims` command does the read, the turn does not consume it
-yet); the task-claim lease on the tuna side; the gregor journal-row diff as the
-acceptance test; the move to vultr next to the keys.
+Incremental streaming (the transcript is assembled correctly but read to the
+end, so latency is not yet improved); prompt caching verified against a real
+billing statement rather than a recorded body; the task-claim lease on the tuna
+side; the gregor journal-row diff as the acceptance test; the move to vultr
+next to the keys.

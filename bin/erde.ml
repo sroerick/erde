@@ -25,7 +25,7 @@ let max_tokens_term = Arg.(value & opt int 1024 & info [ "max-tokens" ] ~docv:"N
 let max_steps_term = Arg.(value & opt int 3 & info [ "max-steps" ] ~docv:"N" ~doc:"Model calls allowed in this microturn.")
 
 let stream_term =
-  Arg.(value & opt bool false & info [ "stream" ] ~doc:"Ask the provider to stream the response and assemble it.")
+  Arg.(value & flag & info [ "stream" ] ~doc:"Ask the provider to stream the response and assemble it.")
 
 let warm_term =
   Arg.(value & opt string "" & info [ "warm" ] ~docv:"PROVIDER" ~doc:"Provider holding the warm prefix.")

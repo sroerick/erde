@@ -2,3 +2,5 @@ _build/
 llm.env
 journal.jsonl
 *.install
+erde.synthetic.json
+journal-synthetic.jsonl
