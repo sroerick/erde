@@ -2,6 +2,10 @@
 
 Erde Lang: the substrate around tuna.  One microturn, journaled, cache-aware.
 
+Repo: `git@wyo.town:/srv/git/erde.git` (remote `wyo`).  Clone with
+`git clone roerick@wyo.town:/srv/git/erde.git`.  cgit on `git.wyo.town` does
+not list it yet, which needs a repo entry in the server's cgitrc.
+
 Design: `tuna/docs/substrate-design.md` on `factory/substrate-design-1029`
 (commit `7a5245e`) is canonical.  This tree is the week-1 walking skeleton
 from that document.
