@@ -5,7 +5,7 @@
     {
       "name": "gomodel",
       "wire": "openai",
-      "base_url": "https://api.gomodel.example/v1",
+      "base_url": "https://api.gomodel.example",
       "key_env": "GOMODEL_API_KEY",
       "cache_mode": "implicit",
       "cache_ttl_s": 1800,
@@ -18,7 +18,7 @@
     {
       "name": "synthetic",
       "wire": "openai",
-      "base_url": "https://api.synthetic.example/v1",
+      "base_url": "https://api.synthetic.example",
       "key_env": "SYNTHETIC_API_KEY",
       "cache_mode": "implicit",
       "cache_ttl_s": 1800,

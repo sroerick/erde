@@ -159,7 +159,7 @@ let request ~env ~sw ?(headers = []) ?body ~meth ~url () =
                           (Tls_eio.client_of_flow (Lazy.force tls_config) ~host:h raw)
                           ~half_close:false
                     | Error (`Msg m) -> failwith m))
-              else exchange raw ~half_close:true
+              else exchange raw ~half_close:false
             in
             Ok (status, body)
           with exn -> Error (Printf.sprintf "%s: %s" host (Printexc.to_string exn))))
