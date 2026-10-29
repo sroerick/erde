@@ -25,6 +25,7 @@ type provider = {
   name : string;
   wire : wire;
   base_url : string;
+  path : string;  (* the endpoint, after base_url; a provider property *)
   key_env : string;
   auth_header : string;
   auth_scheme : string;  (* "Bearer " or "" for x-api-key style *)
@@ -156,6 +157,10 @@ let parse_cache_mode = function
   | "implicit" -> Ok Implicit
   | s -> errf "config: unknown cache mode %S (explicit|implicit)" s
 
+let default_path = function
+  | Anthropic -> "/v1/messages"
+  | Openai -> "/v1/chat/completions"
+
 let parse_provider j =
   let* name = str "name" j in
   let* wire_s = str "wire" j in
@@ -183,6 +188,7 @@ let parse_provider j =
       name;
       wire;
       base_url;
+      path = str_or "path" (default_path wire) j;
       key_env;
       auth_header = str_or "auth_header" "Authorization" j;
       auth_scheme = str_or "auth_scheme" "Bearer " j;

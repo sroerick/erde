@@ -60,11 +60,13 @@ let test_early_edit_moves_later_boundaries () =
 
 (* ---------- cache strategy ---------- *)
 
-let provider ?(mode = Config.Implicit) ?(min = 1024) ?(live = true) name =
+let provider ?(mode = Config.Implicit) ?(min = 1024) ?(live = true) ?(path = "/v1/chat/completions")
+    name =
   {
     Config.name;
     wire = Config.Openai;
     base_url = "http://localhost:1";
+    path;
     key_env = "K";
     auth_header = "Authorization";
     auth_scheme = "Bearer ";
@@ -737,6 +739,21 @@ let test_chunked_response_without_trailer_line () =
   | Error (`Msg m) -> Alcotest.fail m
   | Ok (_, body) -> Alcotest.(check string) "chunks joined" "abc" body
 
+
+let test_endpoint_path_is_a_provider_property () =
+  with_tmp (fun dir ->
+      let path = Filename.concat dir "erde.json" in
+      write path
+        {|{"providers":[
+            {"name":"a","wire":"anthropic","base_url":"https://api.anthropic.com","key_env":"K"},
+            {"name":"b","wire":"openai","base_url":"https://api.synthetic.new/openai/v1","key_env":"K","path":"/chat/completions"}]}|};
+      match Config.load path with
+      | Error m -> Alcotest.fail m
+      | Ok cfg ->
+          let a = List.hd cfg.Config.providers and b = List.nth cfg.Config.providers 1 in
+          Alcotest.(check string) "anthropic default" "/v1/messages" a.Config.path;
+          Alcotest.(check string) "an explicit path wins" "/chat/completions" b.Config.path)
+
 let () =
   Alcotest.run "erde"
     [
@@ -782,6 +799,8 @@ let () =
           Alcotest.test_case "secrets file mode" `Quick test_env_file_mode_is_enforced;
           Alcotest.test_case "load" `Quick test_config_load;
           Alcotest.test_case "missing field" `Quick test_config_missing_field_errors;
+          Alcotest.test_case "the endpoint path is a provider property" `Quick
+            test_endpoint_path_is_a_provider_property;
         ] );
       ( "grants",
         [

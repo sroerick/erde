@@ -38,8 +38,10 @@ type run_result = {
   calls : int;
 }
 
-let path_for (p : Config.provider) =
-  match p.Config.wire with Config.Anthropic -> "/v1/messages" | Config.Openai -> "/v1/chat/completions"
+(* The endpoint is a provider property, not a wire constant: whatever sits in
+   front of the model may serve its own prefix (api.synthetic.new/openai/v1 is
+   a base that already ends in the version), so the provider row says where the
+   call goes. *)
 
 let auth_headers (p : Config.provider) key =
   [
@@ -142,7 +144,7 @@ let one_call ?(stream = false) ~env ~sw ~cfg ~model ~system segs ~task ~max_toke
     Wire.build_request ~stream p plan ~model ~system ~messages ~max_tokens ~tools
     |> Yojson.Safe.to_string
   in
-  let url = p.Config.base_url ^ path_for p in
+  let url = p.Config.base_url ^ p.Config.path in
   let t0 = Unix.gettimeofday () in
   let* status, raw =
     Http_client.request ~env ~sw ~meth:"POST" ~url ~headers:(auth_headers p key) ~body ()
