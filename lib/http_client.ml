@@ -123,9 +123,15 @@ let request ~env ~sw ?(headers = []) ?body ~meth ~url () =
             let headers = ("host", host_header) :: ("connection", "close") :: headers in
             let req = render_request ~meth ~path ~headers ~body in
             let exchange
-                (flow : [> Eio.Flow.two_way_ty | Eio.Resource.close_ty ] Eio.Resource.t) =
+                (flow : [> Eio.Flow.two_way_ty | Eio.Resource.close_ty ] Eio.Resource.t)
+                ~half_close =
               Eio.Flow.copy_string req flow;
-              Eio.Flow.shutdown flow `Send;
+              (* On plain TCP a send-half-close is a genuine half-close and some
+                 servers want it.  Over TLS the same call sends close_notify,
+                 which relayd (and others) read as "connection over" and answer
+                 with EOF: the request is never seen.  So: no half-close on TLS,
+                 where "connection: close" already ends the exchange. *)
+              if half_close then Eio.Flow.shutdown flow `Send;
               Eio.Buf_read.parse_exn ~max_size:(32 * 1024 * 1024) response flow
             in
             let status, body =
@@ -135,9 +141,11 @@ let request ~env ~sw ?(headers = []) ?body ~meth ~url () =
                 | Ok d -> (
                     match Domain_name.host d with
                     | Ok h ->
-                        exchange (Tls_eio.client_of_flow (Lazy.force tls_config) ~host:h raw)
+                        exchange
+                          (Tls_eio.client_of_flow (Lazy.force tls_config) ~host:h raw)
+                          ~half_close:false
                     | Error (`Msg m) -> failwith m))
-              else exchange raw
+              else exchange raw ~half_close:true
             in
             Ok (status, body)
           with exn -> Error (Printf.sprintf "%s: %s" host (Printexc.to_string exn))))

@@ -9,12 +9,17 @@
    Every call row carries the serving provider and the cache counters,
    because a hit rate that is not on screen is a hit rate nobody fixes. *)
 
-type kind = Call | Turn | Verdict
+type kind = Call | Tool | Turn | Verdict
 
-let kind_name = function Call -> "call" | Turn -> "turn" | Verdict -> "verdict"
+let kind_name = function
+  | Call -> "call"
+  | Tool -> "tool"
+  | Turn -> "turn"
+  | Verdict -> "verdict"
 
 let kind_of_string = function
   | "call" -> Call
+  | "tool" -> Tool
   | "turn" -> Turn
   | "verdict" -> Verdict
   | _ -> Call
@@ -34,6 +39,7 @@ type row = {
   latency_ms : int;
   route : string;
   outcome : string;
+  detail : string;  (* a tool row's args and result, or why it was refused *)
   ref_ : string;  (* for a verdict: the seq (as string) it corrects *)
 }
 
@@ -58,6 +64,7 @@ let to_json r =
       ("latency_ms", `Int r.latency_ms);
       ("route", `String r.route);
       ("outcome", `String r.outcome);
+      ("detail", `String r.detail);
       ("ref", `String r.ref_);
     ]
 
@@ -88,6 +95,7 @@ let of_json j =
       latency_ms = int_field "latency_ms" j;
       route = str_field "route" j;
       outcome = str_field "outcome" j;
+      detail = str_field "detail" j;
       ref_ = str_field "ref" j;
     }
 

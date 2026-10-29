@@ -35,12 +35,18 @@ type provider = {
 
 type route = { model : string; candidates : string list }
 
+(* The authority is tuna.  Base URL and the env var holding the bearer; the
+   token itself never appears in this type. *)
+type authority = { base_url : string; token_env : string; claims_prefix : string }
+
 type t = {
   path : string;
   journal : string;
   identity : string;
   providers : provider list;
   routes : route list;
+  authority : authority;
+  grants : Grants.row list;
   env : (string * string) list;
 }
 
@@ -216,6 +222,18 @@ let load ?env_file ?(allow_insecure = false) path =
     if Sys.file_exists env_file then load_env_file ~allow_insecure env_file
     else Ok []
   in
+  let authority =
+    let a = match field "authority" json with Some j -> j | None -> `Assoc [] in
+    {
+      base_url = str_or "base_url" "http://127.0.0.1:18090" a;
+      token_env = str_or "token_env" "TUNA_TOKEN" a;
+      claims_prefix = str_or "claims_prefix" "" a;
+    }
+  in
+  let grants =
+    list_of "grants" json
+    |> List.filter_map (fun j -> match Grants.of_json j with Ok r -> Some r | Error _ -> None)
+  in
   Ok
     {
       path;
@@ -223,6 +241,8 @@ let load ?env_file ?(allow_insecure = false) path =
       identity = str_or "identity" "unattributed" json;
       providers;
       routes;
+      authority;
+      grants;
       env;
     }
 
@@ -270,6 +290,15 @@ let key t p =
       match Sys.getenv_opt p.key_env with
       | Some v when v <> "" -> Ok v
       | _ -> errf "provider %s: no secret in %s" p.name p.key_env)
+
+let authority_token t =
+  let from_env k = match List.assoc_opt k t.env with Some v when v <> "" -> Some v | _ -> None in
+  match from_env t.authority.token_env with
+  | Some v -> Ok v
+  | None -> (
+      match Sys.getenv_opt t.authority.token_env with
+      | Some v when v <> "" -> Ok v
+      | _ -> errf "authority: no bearer in %s" t.authority.token_env)
 
 let replace_all ~needle ~by hay =
   if needle = "" then hay

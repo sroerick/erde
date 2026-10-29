@@ -26,6 +26,10 @@ type response = { text : string option; tool_calls : tool_call list; usage : usa
 
 let int_of = function `Int i -> i | `Float f -> int_of_float f | _ -> 0
 
+let field name = function `Assoc kvs -> List.assoc_opt name kvs | _ -> None
+
+let opt_string_field name j = match field name j with Some (`String s) -> Some s | _ -> None
+
 let opt_int j path =
   let rec go j = function
     | [] -> Some j
@@ -50,8 +54,8 @@ let anthropic_blocks segs breakpoints =
            | other -> other
          else base)
 
-let build_request (p : Config.provider) (plan : Cache_strategy.plan) ~model ~system ~messages
-    ~max_tokens ~tools =
+let build_request ?(stream = false) (p : Config.provider) (plan : Cache_strategy.plan) ~model
+    ~system ~messages ~max_tokens ~tools =
   let messages_json =
     List.map (fun (role, content) -> `Assoc [ ("role", `String role); ("content", `String content) ]) messages
   in
@@ -65,6 +69,7 @@ let build_request (p : Config.provider) (plan : Cache_strategy.plan) ~model ~sys
           ("messages", `List messages_json);
         ]
         @ (if tools = [] then [] else [ ("tools", `List tools) ])
+        @ if stream then [ ("stream", `Bool true) ] else []
       in
       `Assoc kvs
   | Config.Openai ->
@@ -76,6 +81,10 @@ let build_request (p : Config.provider) (plan : Cache_strategy.plan) ~model ~sys
           ("messages", `List (sys :: messages_json));
         ]
         @ (if tools = [] then [] else [ ("tools", `List tools) ])
+        (* without this the final chunk carries no usage and the row records
+           zero tokens for a call that was billed *)
+        @ if stream then [ ("stream", `Bool true); ("stream_options", `Assoc [ ("include_usage", `Bool true) ]) ]
+          else []
       in
       ignore plan;
       `Assoc kvs
@@ -187,3 +196,163 @@ let cost_usd (p : Config.provider) (u : usage) =
       per u.input pr.Config.input
       +. per u.output pr.Config.output
       +. per u.cache_read (pr.Config.input *. pr.Config.cache_read_mult)
+
+(* ---------- streaming ----------
+
+   Both wires stream the same conceptual thing with different addresses:
+
+     Anthropic  named events (message_start carries the input and cache
+                counters, content_block_* carries text and tool_use, and
+                message_delta carries the output count and stop reason)
+     OpenAI     anonymous chunks whose delta carries content and tool_calls
+                fragments, with usage only in the final chunk when
+                stream_options.include_usage is set
+
+   Tool arguments arrive as fragments of a JSON string and are only valid once
+   the stream says the block is done, so the assembler concatenates and parses
+   at the end: an argument blob is data, never something to evaluate early. *)
+
+type stream = {
+  buf : Buffer.t;
+  tools : (int, string * Buffer.t) Hashtbl.t;
+  mutable order : int list;
+  mutable usage : usage;
+  mutable stop : string option;
+}
+
+let new_stream () =
+  {
+    buf = Buffer.create 256;
+    tools = Hashtbl.create 4;
+    order = [];
+    usage = usage_zero;
+    stop = None;
+  }
+
+let tool_slot st index =
+  match Hashtbl.find_opt st.tools index with
+  | Some slot -> slot
+  | None ->
+      let slot = ("", Buffer.create 64) in
+      Hashtbl.add st.tools index slot;
+      st.order <- st.order @ [ index ];
+      slot
+
+let feed st (p : Config.provider) (j : Yojson.Safe.t) =
+  match p.Config.wire with
+  | Config.Anthropic -> (
+      match opt_string_field "type" j with
+      | Some "message_start" ->
+          st.usage <-
+            {
+              input = opt_int j [ "message"; "usage"; "input_tokens" ];
+              output = 0;
+              cache_write = opt_int j [ "message"; "usage"; "cache_creation_input_tokens" ];
+              cache_read = opt_int j [ "message"; "usage"; "cache_read_input_tokens" ];
+            }
+      | Some "content_block_start" -> (
+          match field "content_block" j with
+          | Some cb when opt_string_field "type" cb = Some "tool_use" ->
+              let index = opt_int j [ "index" ] in
+              let name = match opt_string_field "name" cb with Some n -> n | None -> "" in
+              ignore (tool_slot st index);
+              Hashtbl.replace st.tools index (name, snd (tool_slot st index))
+          | _ -> ())
+      | Some "content_block_delta" -> (
+          let index = opt_int j [ "index" ] in
+          match field "delta" j with
+          | Some d -> (
+              match opt_string_field "type" d with
+              | Some "text_delta" ->
+                  (match opt_string_field "text" d with
+                  | Some t -> Buffer.add_string st.buf t
+                  | None -> ())
+              | Some "input_json_delta" -> (
+                  match opt_string_field "partial_json" d with
+                  | Some frag -> Buffer.add_string (snd (tool_slot st index)) frag
+                  | None -> ())
+              | _ -> ())
+          | None -> ())
+      | Some "message_delta" ->
+          st.usage <- { st.usage with output = opt_int j [ "usage"; "output_tokens" ] };
+          (match field "delta" j with
+          | Some d -> ( match opt_string_field "stop_reason" d with Some s -> st.stop <- Some s | None -> ())
+          | None -> ())
+      | _ -> ())
+  | Config.Openai -> (
+      (match field "usage" j with
+      | Some `Null | None -> ()
+      | Some _ ->
+          let prompt = opt_int j [ "usage"; "prompt_tokens" ] in
+          let cached = opt_int j [ "usage"; "prompt_tokens_details"; "cached_tokens" ] in
+          st.usage <-
+            {
+              input = max 0 (prompt - cached);
+              output = opt_int j [ "usage"; "completion_tokens" ];
+              cache_write = 0;
+              cache_read = cached;
+            });
+      match field "choices" j with
+      | Some (`List (choice :: _)) -> (
+          (match field "delta" choice with
+          | Some d -> (
+              (match opt_string_field "content" d with
+              | Some t -> Buffer.add_string st.buf t
+              | None -> ());
+              match field "tool_calls" d with
+              | Some (`List tcs) ->
+                  List.iter
+                    (fun tc ->
+                      let index = opt_int tc [ "index" ] in
+                      let name, args = tool_slot st index in
+                      let name =
+                        match field "function" tc with
+                        | Some f -> (
+                            match opt_string_field "name" f with Some n -> n | None -> name)
+                        | None -> name
+                      in
+                      (match field "function" tc with
+                      | Some f -> (
+                          match opt_string_field "arguments" f with
+                          | Some frag -> Buffer.add_string args frag
+                          | None -> ())
+                      | None -> ());
+                      Hashtbl.replace st.tools index (name, args))
+                    tcs
+              | _ -> ())
+          | None -> ());
+          match opt_string_field "finish_reason" choice with
+          | Some s -> st.stop <- Some s
+          | None -> ())
+      | _ -> ())
+
+let feed_events st p events =
+  List.iter
+    (fun (e : Sse.event) ->
+      if e.Sse.data <> "" && e.Sse.data <> "[DONE]" then
+        match Yojson.Safe.from_string e.Sse.data with
+        | exception Yojson.Json_error _ -> ()
+        | j -> feed st p j)
+    events
+
+let finish_stream st =
+  let tool_calls =
+    st.order
+    |> List.filter_map (fun index ->
+           match Hashtbl.find_opt st.tools index with
+           | None -> None
+           | Some (name, args) ->
+               let json = Buffer.contents args in
+               let parsed =
+                 if json = "" then `Null
+                 else (try Yojson.Safe.from_string json with _ -> `String json)
+               in
+               Some { name; args = parsed })
+  in
+  let text = Buffer.contents st.buf in
+  { text = (if text = "" then None else Some text); tool_calls; usage = st.usage; stop = st.stop }
+
+let assemble_stream p (body : string) =
+  let st = new_stream () in
+  feed_events st p (Sse.parse body);
+  finish_stream st

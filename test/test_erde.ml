@@ -169,6 +169,8 @@ let routed_config () =
     identity = "t";
     providers = [ provider "gomodel"; provider ~live:false "neuralwatt"; provider "synthetic" ];
     routes = [ { Config.model = "glm"; candidates = [ "gomodel"; "neuralwatt"; "synthetic" ] } ];
+    authority = { Config.base_url = "http://127.0.0.1:1"; token_env = "TUNA_TOKEN"; claims_prefix = "u.t." };
+    grants = [];
     env = [];
   }
 
@@ -212,6 +214,7 @@ let sample_row seq provider =
     latency_ms = 12;
     route = "cold";
     outcome = "end_turn";
+    detail = "";
     ref_ = "";
   }
 
@@ -367,6 +370,346 @@ let test_handle_response_journals_a_failure () =
               Alcotest.(check string) "outcome is the status" "http 401"
                 (List.hd rows).Journal.outcome)
 
+
+(* ---------- grants ---------- *)
+
+let g id prim prefix = { Grants.id; prim; path_prefix = prefix; live = true }
+
+let ok = function Ok _ -> true | Error _ -> false
+
+let test_grant_coverage () =
+  let t = [ g "a" "tree.get" (Some "u.marin.") ] in
+  Alcotest.(check bool) "covered" true (ok (Grants.check t ~prim:"tree.get" ~path:"u.marin.notes"));
+  Alcotest.(check bool) "another identity's subtree is not covered" false
+    (ok (Grants.check t ~prim:"tree.get" ~path:"u.gregor.notes"));
+  Alcotest.(check bool) "the prim matters" false
+    (ok (Grants.check t ~prim:"tree.put" ~path:"u.marin.notes"));
+  match Grants.check t ~prim:"tree.put" ~path:"u.marin.notes" with
+  | Error m -> Alcotest.(check bool) "names the missing prim" true (contains m "tree.put")
+  | Ok _ -> Alcotest.fail "unreachable"
+
+let test_grant_unscoped_and_empty () =
+  Alcotest.(check bool) "unscoped covers every path" true
+    (ok (Grants.check [ g "b" "echo" None ] ~prim:"echo" ~path:"anything.at.all"));
+  Alcotest.(check bool) "an empty prefix covers nothing" false
+    (ok (Grants.check [ g "c" "echo" (Some "") ] ~prim:"echo" ~path:"x"))
+
+let test_grant_dead_row_is_not_a_capability () =
+  Alcotest.(check bool) "a dead row refuses" false
+    (ok (Grants.check [ { (g "d" "echo" None) with Grants.live = false } ] ~prim:"echo" ~path:"x"))
+
+let test_tuna_grant_envelope () =
+  let live =
+    Yojson.Safe.from_string
+      {|{"grant":{"id":"g1","prim":"tree.get","path_prefix":"u.marin.","caller":"c"},"lineage":[]}|}
+  in
+  (match Grants.of_tuna_grant live with
+  | Error m -> Alcotest.fail m
+  | Ok r ->
+      Alcotest.(check (option string)) "prefix read" (Some "u.marin.") r.Grants.path_prefix;
+      Alcotest.(check bool) "live" true r.Grants.live);
+  let revoked =
+    Yojson.Safe.from_string
+      {|{"grant":{"id":"g1","prim":"tree.get","revoked_at":"2026-10-29T00:00:00Z"}}|}
+  in
+  match Grants.of_tuna_grant revoked with
+  | Error m -> Alcotest.fail m
+  | Ok r -> Alcotest.(check bool) "a revoked grant row is not a capability" false r.Grants.live
+
+(* ---------- tools ---------- *)
+
+let with_eio f = Eio_main.run @@ fun env -> Eio.Switch.run @@ fun sw -> f ~env ~sw
+
+let dead_authority = Authority.make ~base_url:"http://127.0.0.1:1" ~token:"t"
+
+let test_tool_refuses_without_a_grant () =
+  with_eio (fun ~env ~sw ->
+      match
+        Tools.dispatch ~env ~sw ~authority:dead_authority ~grants:[]
+          { Tools.prim = "tree.get"; args = `Assoc [ ("path", `String "u.marin.x") ] }
+      with
+      | Ok _ -> Alcotest.fail "a call with no grant must be refused"
+      | Error m ->
+          Alcotest.(check bool) "the refusal says denied" true
+            (String.length m >= 7 && String.sub m 0 7 = "denied:"))
+
+let test_tool_echo_is_gated_but_local () =
+  with_eio (fun ~env ~sw ->
+      match
+        Tools.dispatch ~env ~sw ~authority:dead_authority ~grants:[ g "e" "echo" None ]
+          { Tools.prim = "echo"; args = `Assoc [ ("x", `Int 1) ] }
+      with
+      | Error m -> Alcotest.fail m
+      | Ok j -> Alcotest.(check string) "echoes its args" {|{"x":1}|} (Yojson.Safe.to_string j))
+
+let test_tool_unknown_prim () =
+  with_eio (fun ~env ~sw ->
+      match
+        Tools.dispatch ~env ~sw ~authority:dead_authority ~grants:[]
+          { Tools.prim = "shell.exec"; args = `Assoc [] }
+      with
+      | Ok _ -> Alcotest.fail "an unknown prim must not run"
+      | Error m -> Alcotest.(check bool) "unknown prim named" true (contains m "shell.exec"))
+
+let test_tool_gate_passes_then_the_authority_is_reached () =
+  (* the grant covers it, so the call is attempted and fails on the network:
+     a denial and a network failure must not be confused *)
+  with_eio (fun ~env ~sw ->
+      match
+        Tools.dispatch ~env ~sw ~authority:dead_authority
+          ~grants:[ g "f" "tree.get" (Some "u.marin.") ]
+          { Tools.prim = "tree.get"; args = `Assoc [ ("path", `String "u.marin.x") ] }
+      with
+      | Ok _ -> Alcotest.fail "an unreachable authority cannot answer"
+      | Error m -> Alcotest.(check bool) "not a denial" false (contains m "denied"))
+
+let test_schemas_are_wire_shaped () =
+  let names wire =
+    Tools.schemas wire
+    |> List.filter_map (function
+         | `Assoc kvs as j ->
+             let n =
+               match List.assoc_opt "name" kvs with
+               | Some (`String n) -> Some n
+               | _ -> (
+                   match List.assoc_opt "function" kvs with
+                   | Some (`Assoc f) -> ( match List.assoc_opt "name" f with Some (`String n) -> Some n | _ -> None)
+                   | _ -> None)
+             in
+             ignore j;
+             n
+         | _ -> None)
+  in
+  Alcotest.(check (list string)) "anthropic tools are flat"
+    [ "tree.get"; "tree.list"; "tree.put" ]
+    (names Config.Anthropic);
+  Alcotest.(check (list string)) "openai tools are function-wrapped"
+    [ "tree.get"; "tree.list"; "tree.put" ]
+    (names Config.Openai)
+
+(* ---------- the tool loop records its decisions ---------- *)
+
+let test_execute_calls_records_every_decision () =
+  with_tmp (fun dir ->
+      let cfg_path = Filename.concat dir "erde.json" in
+      write cfg_path config_json;
+      write (Filename.concat dir "llm.env") "GOMODEL_API_KEY=k\n";
+      Unix.chmod (Filename.concat dir "llm.env") 0o600;
+      match Config.load cfg_path with
+      | Error m -> Alcotest.fail m
+      | Ok cfg ->
+          let cfg = { cfg with Config.journal = Filename.concat dir "j.jsonl" } in
+          let p = List.hd cfg.Config.providers in
+          let plan = Cache_strategy.plan p (big_segments ()) in
+          let calls =
+            [
+              { Wire.name = "echo"; args = `Assoc [ ("n", `Int 1) ] };
+              { Wire.name = "tree.get"; args = `Assoc [ ("path", `String "u.marin.x") ] };
+            ]
+          in
+          let grants = [ g "z" "echo" None ] in
+          let steps =
+            with_eio (fun ~env ~sw ->
+                Turn.execute_calls ~env ~sw ~cfg ~authority:dead_authority ~grants ~plan
+                  ~provider:"gomodel" ~model:"glm" ~task:"t" ~route:"cold" ~ordinal_start:1
+                  calls)
+          in
+          Alcotest.(check int) "two steps" 2 (List.length steps);
+          Alcotest.(check bool) "first allowed" true (List.nth steps 0).Turn.allowed;
+          Alcotest.(check bool) "second refused" false (List.nth steps 1).Turn.allowed;
+          match Journal.read cfg.Config.journal with
+          | Error m -> Alcotest.fail m
+          | Ok rows ->
+              Alcotest.(check int) "one row per tool call" 2 (List.length rows);
+              Alcotest.(check string) "tool kind" "tool" (Journal.kind_name (List.nth rows 0).Journal.kind);
+              Alcotest.(check string) "the allowed one" "ok" (List.nth rows 0).Journal.outcome;
+              Alcotest.(check string) "the refused one" "denied" (List.nth rows 1).Journal.outcome;
+              Alcotest.(check bool) "the refusal is in the detail" true
+                (contains (List.nth rows 1).Journal.detail "REFUSED"))
+
+let test_verdict_row_corrects_by_reference () =
+  with_tmp (fun dir ->
+      let path = Filename.concat dir "j.jsonl" in
+      (match Journal.append ~path (sample_row 0 "gomodel") with
+      | Ok () -> ()
+      | Error m -> Alcotest.fail m);
+      let v =
+        {
+          (sample_row 1 "") with
+          Journal.kind = Journal.Verdict;
+          outcome = "refuted";
+          detail = "the citation no longer resolves";
+          ref_ = "0";
+        }
+      in
+      (match Journal.append ~path v with
+      | Ok () -> ()
+      | Error m -> Alcotest.fail m);
+      match Journal.read path with
+      | Error m -> Alcotest.fail m
+      | Ok rows ->
+          Alcotest.(check int) "two rows" 2 (List.length rows);
+          Alcotest.(check string) "verdict kind" "verdict"
+            (Journal.kind_name (List.nth rows 1).Journal.kind);
+          Alcotest.(check string) "points at the row it corrects" "0" (List.nth rows 1).Journal.ref_;
+          Alcotest.(check string) "the original row is untouched" "end_turn"
+            (List.nth rows 0).Journal.outcome)
+
+
+(* ---------- the cache-locality scheduler ---------- *)
+
+let mk ?(tokens = 4000) ?(ttl = 300) ?(min = 1024) ?(prio = 0) id provider hash =
+  {
+    Schedule.id;
+    prefix_hash = hash;
+    prefix_tokens = tokens;
+    provider;
+    ttl_s = ttl;
+    min_prefix_tokens = min;
+    priority = prio;
+  }
+
+let test_schedule_groups_by_cache_key () =
+  let tasks =
+    [ mk "a" "p" "h1"; mk "b" "p" "h1"; mk "c" "p" "h1"; mk "d" "p" "h2" ]
+  in
+  let bs = Schedule.plan ~now:0.0 tasks in
+  Alcotest.(check int) "one group per cache key" 2 (List.length bs);
+  let first = List.hd bs in
+  Alcotest.(check int) "the shared prefix runs together" 3 (List.length first.Schedule.ids);
+  Alcotest.(check int) "one write pays for the group" 1 first.Schedule.writes;
+  Alcotest.(check int) "the rest read" 2 first.Schedule.reads
+
+let test_schedule_splits_windows_by_capacity () =
+  let tasks = List.init 5 (fun i -> mk (Printf.sprintf "t%d" i) "p" "h1") in
+  let bs = Schedule.plan ~capacity:2 ~now:0.0 tasks in
+  Alcotest.(check int) "ceil(5/2) windows" 3 (List.length bs);
+  Alcotest.(check int) "each window writes once" 3
+    (List.fold_left (fun a b -> a + b.Schedule.writes) 0 bs);
+  Alcotest.(check bool) "windows are ordered in time" true
+    ((List.nth bs 0).Schedule.opens_at < (List.nth bs 1).Schedule.opens_at)
+
+let test_schedule_uncacheable_gets_its_own_lane () =
+  let tasks = [ mk ~tokens:100 "a" "p" "small1"; mk ~tokens:100 "b" "p" "small2" ] in
+  let bs = Schedule.plan ~now:0.0 tasks in
+  Alcotest.(check int) "one lane each" 2 (List.length bs);
+  Alcotest.(check bool) "nothing under the minimum is called cacheable" false
+    (List.hd bs).Schedule.cacheable;
+  Alcotest.(check int) "no reads are claimed" 0 (List.hd bs).Schedule.reads
+
+let test_schedule_summary () =
+  let tasks = [ mk "a" "p" "h1"; mk "b" "p" "h1"; mk ~tokens:10 "c" "p" "tiny" ] in
+  let s = Schedule.summary (Schedule.plan ~now:0.0 tasks) in
+  Alcotest.(check bool) "one write, one read" true (contains s "writes=1" && contains s "reads=1");
+  Alcotest.(check bool) "the uncacheable task is counted separately" true
+    (contains s "uncacheable_tasks=1")
+
+
+(* ---------- streaming ---------- *)
+
+let anthropic_sse =
+  {|event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":100,"cache_creation_input_tokens":2000,"cache_read_input_tokens":8000}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"port "}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"the list prims"}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"tree.get","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"u.marin."}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"notes\"}"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":40}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+|}
+
+let openai_sse =
+  {|data: {"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"port "}}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"tree.get","arguments":"{\"pa"}}]}}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"u.marin.notes\"}"}}]}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":5000,"completion_tokens":120,"prompt_tokens_details":{"cached_tokens":4096}}}
+
+data: [DONE]
+
+|}
+
+let test_anthropic_stream_assembly () =
+  let p = anthropic_provider () in
+  let r = Wire.assemble_stream p anthropic_sse in
+  Alcotest.(check (option string)) "text assembled" (Some "port the list prims") r.Wire.text;
+  Alcotest.(check int) "input from message_start" 100 r.Wire.usage.Wire.input;
+  Alcotest.(check int) "cache write from message_start" 2000 r.Wire.usage.Wire.cache_write;
+  Alcotest.(check int) "cache read from message_start" 8000 r.Wire.usage.Wire.cache_read;
+  Alcotest.(check int) "output from message_delta" 40 r.Wire.usage.Wire.output;
+  Alcotest.(check (option string)) "stop reason" (Some "tool_use") r.Wire.stop;
+  match r.Wire.tool_calls with
+  | [ tc ] ->
+      Alcotest.(check string) "tool name from content_block_start" "tree.get" tc.Wire.name;
+      Alcotest.(check string) "arguments assembled from fragments"
+        {|{"path":"u.marin.notes"}|} (Yojson.Safe.to_string tc.Wire.args)
+  | other -> Alcotest.failf "expected one tool call, got %d" (List.length other)
+
+let test_openai_stream_assembly () =
+  let p = provider "gomodel" in
+  let r = Wire.assemble_stream p openai_sse in
+  Alcotest.(check (option string)) "text assembled" (Some "port ") r.Wire.text;
+  Alcotest.(check int) "cached is a subset of prompt" 904 r.Wire.usage.Wire.input;
+  Alcotest.(check int) "cached read" 4096 r.Wire.usage.Wire.cache_read;
+  Alcotest.(check int) "output" 120 r.Wire.usage.Wire.output;
+  Alcotest.(check (option string)) "finish reason" (Some "tool_calls") r.Wire.stop;
+  match r.Wire.tool_calls with
+  | [ tc ] ->
+      Alcotest.(check string) "tool name from the first fragment" "tree.get" tc.Wire.name;
+      Alcotest.(check string) "arguments assembled across chunks"
+        {|{"path":"u.marin.notes"}|} (Yojson.Safe.to_string tc.Wire.args)
+  | other -> Alcotest.failf "expected one tool call, got %d" (List.length other)
+
+let test_stream_request_flags () =
+  let segs = big_segments () in
+  let p = anthropic_provider () in
+  let plan = Cache_strategy.plan p segs in
+  let a =
+    Wire.build_request ~stream:true p plan ~model:"m" ~system:"s" ~messages:[] ~max_tokens:8 ~tools:[]
+  in
+  Alcotest.(check bool) "anthropic asks to stream" true
+    (match Config.field "stream" a with Some (`Bool true) -> true | _ -> false);
+  let q = provider "gomodel" in
+  let b =
+    Wire.build_request ~stream:true q (Cache_strategy.plan q segs) ~model:"m" ~system:"s"
+      ~messages:[] ~max_tokens:8 ~tools:[]
+  in
+  Alcotest.(check bool) "openai asks for usage in the final chunk" true
+    (match Config.field "stream_options" b with
+    | Some o -> ( match Config.field "include_usage" o with Some (`Bool true) -> true | _ -> false)
+    | None -> false);
+  let c =
+    Wire.build_request q (Cache_strategy.plan q segs) ~model:"m" ~system:"s" ~messages:[]
+      ~max_tokens:8 ~tools:[]
+  in
+  Alcotest.(check bool) "and not when not streaming" false
+    (match Config.field "stream" c with Some _ -> true | None -> false)
+
 let () =
   Alcotest.run "erde"
     [
@@ -400,7 +743,11 @@ let () =
           Alcotest.test_case "unknown model errors" `Quick test_unknown_model_errors;
         ] );
       ( "journal",
-        [ Alcotest.test_case "round trip and hit rates" `Quick test_journal_round_trip ] );
+        [
+          Alcotest.test_case "round trip and hit rates" `Quick test_journal_round_trip;
+          Alcotest.test_case "a verdict corrects an earlier row" `Quick
+            test_verdict_row_corrects_by_reference;
+        ] );
       ("sse", [ Alcotest.test_case "parse" `Quick test_sse_parse ]);
       ( "config",
         [
@@ -409,11 +756,48 @@ let () =
           Alcotest.test_case "load" `Quick test_config_load;
           Alcotest.test_case "missing field" `Quick test_config_missing_field_errors;
         ] );
+      ( "grants",
+        [
+          Alcotest.test_case "coverage follows the prefix rule" `Quick test_grant_coverage;
+          Alcotest.test_case "unscoped covers, empty covers nothing" `Quick
+            test_grant_unscoped_and_empty;
+          Alcotest.test_case "a dead row is not a capability" `Quick
+            test_grant_dead_row_is_not_a_capability;
+          Alcotest.test_case "the tuna grant envelope" `Quick test_tuna_grant_envelope;
+        ] );
+      ( "tools",
+        [
+          Alcotest.test_case "no grant, no call" `Quick test_tool_refuses_without_a_grant;
+          Alcotest.test_case "echo is gated but local" `Quick test_tool_echo_is_gated_but_local;
+          Alcotest.test_case "an unknown prim never runs" `Quick test_tool_unknown_prim;
+          Alcotest.test_case "granted means attempted" `Quick
+            test_tool_gate_passes_then_the_authority_is_reached;
+          Alcotest.test_case "schemas match the wire" `Quick test_schemas_are_wire_shaped;
+        ] );
+      ( "stream",
+        [
+          Alcotest.test_case "anthropic transcript assembles" `Quick
+            test_anthropic_stream_assembly;
+          Alcotest.test_case "openai transcript assembles" `Quick test_openai_stream_assembly;
+          Alcotest.test_case "the request asks for what it needs" `Quick
+            test_stream_request_flags;
+        ] );
+      ( "schedule",
+        [
+          Alcotest.test_case "one group per cache key" `Quick test_schedule_groups_by_cache_key;
+          Alcotest.test_case "a big group splits into windows" `Quick
+            test_schedule_splits_windows_by_capacity;
+          Alcotest.test_case "an uncacheable prefix has its own lane" `Quick
+            test_schedule_uncacheable_gets_its_own_lane;
+          Alcotest.test_case "the summary counts what it bought" `Quick test_schedule_summary;
+        ] );
       ( "turn",
         [
           Alcotest.test_case "success path journals" `Quick
             test_handle_response_journals_the_success_path;
           Alcotest.test_case "failure path journals" `Quick
             test_handle_response_journals_a_failure;
+          Alcotest.test_case "every tool decision is a row" `Quick
+            test_execute_calls_records_every_decision;
         ] );
     ]

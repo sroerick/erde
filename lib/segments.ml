@@ -81,18 +81,44 @@ let boundaries t =
 
    The order is canonical by construction: sorted by (path, value, source).
    Two fetches returning the same set in a different order must produce the
-   same prefix hash, or every run pays full price for nothing. *)
+   same prefix hash, or every run pays full price for nothing.
+
+   The rendering matters as much as the order.  A claim's value on tuna is a
+   citation: the canonical ternary of the recorded computation, and those are
+   large -- eight claims of a real garden measured 17,668 tokens, which is a
+   prefix nobody wants to write on every reseal.  So a claim enters the prompt
+   at one of three densities:
+
+     Full      path = value [citation]      everything, for a reseal run
+     Cited     path [citation]              the index; the value is a
+                                            grant-gated tree.get away
+     Truncated path = value... [citation]   a bounded taste
+
+   Cited is the default for a turn, and it is the density that makes the tool
+   host load-bearing: the prompt says what exists and where it is proven, and
+   the model spends a tool call when it needs the payload. *)
 module Claim_set = struct
   type claim = { path : string; value : string; source : string }
+  type render_mode = Full | Cited | Truncated of int
 
   let compare a b = compare (a.path, a.value, a.source) (b.path, b.value, b.source)
   let canonicalize claims = List.sort compare claims
 
-  let render claims =
+  let mode_name = function Full -> "full" | Cited -> "cited" | Truncated n -> Printf.sprintf "trunc%d" n
+
+  let render ?(mode = Cited) claims =
     canonicalize claims
-    |> List.map (fun c -> Printf.sprintf "- %s = %s [%s]" c.path c.value c.source)
+    |> List.map (fun c ->
+           match mode with
+           | Full -> Printf.sprintf "- %s = %s [%s]" c.path c.value c.source
+           | Cited -> Printf.sprintf "- %s [%s]" c.path c.source
+           | Truncated n ->
+               let v = if String.length c.value <= n then c.value else String.sub c.value 0 n ^ "..." in
+               Printf.sprintf "- %s = %s [%s]" c.path v c.source)
     |> String.concat "\n"
 
-  let hash claims = hash_of (render claims)
-  let segment claims = { kind = Claims; id = hash claims; text = render claims }
+  let hash ?(mode = Cited) claims = hash_of (mode_name mode ^ "\n" ^ render ~mode claims)
+
+  let segment ?(mode = Cited) claims =
+    { kind = Claims; id = hash ~mode claims; text = render ~mode claims }
 end

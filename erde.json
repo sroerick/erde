@@ -54,7 +54,40 @@
     }
   ],
   "routes": [
-    { "model": "glm-5.3-flash", "candidates": ["gomodel", "synthetic", "neuralwatt"] },
-    { "model": "claude-sonnet-5.5", "candidates": ["anthropic"] }
+    {
+      "model": "glm-5.3-flash",
+      "candidates": [
+        "gomodel",
+        "synthetic",
+        "neuralwatt"
+      ]
+    },
+    {
+      "model": "claude-sonnet-5.5",
+      "candidates": [
+        "anthropic"
+      ]
+    }
+  ],
+  "authority": {
+    "base_url": "https://tuna.town",
+    "token_env": "TUNA_MARIN_TOKEN",
+    "claims_prefix": "u.marin."
+  },
+  "grants": [
+    {
+      "id": "g-read",
+      "prim": "tree.get",
+      "path_prefix": "u.marin."
+    },
+    {
+      "id": "g-list",
+      "prim": "tree.list",
+      "path_prefix": "u.marin."
+    },
+    {
+      "id": "g-echo",
+      "prim": "echo"
+    }
   ]
 }

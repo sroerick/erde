@@ -2,13 +2,14 @@
 
    The unit is not a conversation turn.  A microturn is: choose a provider
    (route), plan the cache, render the segments, spend one model call with a
-   grant-sized budget, and journal what it cost and where it ran.  Nothing
-   here owns state that survives the call: continuity lives in claims.
+   grant-sized budget, run whatever tools it asks for (each one gated before
+   it leaves the process), and journal every step.
 
-   Tool calls come back as typed JSON, never as a shell string.
-
-   [handle_response] is separated from [run] so the success path can be
-   tested against a recorded body instead of a live provider. *)
+   Boundaries, deliberately:
+     - nothing here owns state that survives the call; continuity lives in
+       claims;
+     - tool calls come back as typed JSON, never as a shell string;
+     - a refused tool call is a journal row, not a provider round trip. *)
 
 let ( let* ) r f = match r with Ok v -> f v | Error _ as e -> e
 
@@ -23,10 +24,22 @@ type outcome = {
   raw : string;
 }
 
+type step = {
+  ordinal : int;
+  prim : string;
+  args : Yojson.Safe.t;
+  allowed : bool;
+  result : string;
+}
+
+type run_result = {
+  outcome : outcome option;  (* None only when the step budget ran out first *)
+  steps : step list;
+  calls : int;
+}
+
 let path_for (p : Config.provider) =
-  match p.Config.wire with
-  | Config.Anthropic -> "/v1/messages"
-  | Config.Openai -> "/v1/chat/completions"
+  match p.Config.wire with Config.Anthropic -> "/v1/messages" | Config.Openai -> "/v1/chat/completions"
 
 let auth_headers (p : Config.provider) key =
   [
@@ -35,11 +48,12 @@ let auth_headers (p : Config.provider) key =
     ("accept", "application/json");
   ]
 
-let row ~cfg ~plan ~provider ~model ~task ~route ~usage ~cost ~latency_ms ~outcome =
+let row ~kind ~cfg ~plan ~provider ~model ~task ~route ~usage ~cost ~latency_ms ~outcome
+    ~detail =
   {
     Journal.seq = Journal.next_seq cfg.Config.journal;
     ts = Unix.gettimeofday ();
-    kind = Journal.Call;
+    kind;
     identity = cfg.Config.identity;
     task;
     model;
@@ -51,6 +65,7 @@ let row ~cfg ~plan ~provider ~model ~task ~route ~usage ~cost ~latency_ms ~outco
     latency_ms;
     route;
     outcome;
+    detail;
     ref_ = "";
   }
 
@@ -59,14 +74,20 @@ let record cfg r =
   | Ok () -> ()
   | Error m -> prerr_endline ("erde: journal write failed: " ^ m)
 
+let truncate n s = if String.length s <= n then s else String.sub s 0 n ^ "..."
+
+(* The parsing + journalling seam, so the success path can be tested against
+   a recorded body instead of a live provider. *)
 let handle_response ~cfg ~(p : Config.provider) ~plan ~model ~task ~route ~latency_ms ~status
     ~raw =
   if status < 200 || status >= 300 then begin
-    let body = String.sub raw 0 (min 400 (String.length raw)) in
     record cfg
-      (row ~cfg ~plan ~provider:p.Config.name ~model ~task ~route ~usage:Wire.usage_zero
-         ~cost:0.0 ~latency_ms ~outcome:(Printf.sprintf "http %d" status));
-    Error (Printf.sprintf "provider %s: http %d: %s" p.Config.name status (Config.redact cfg body))
+      (row ~kind:Journal.Call ~cfg ~plan ~provider:p.Config.name ~model ~task ~route
+         ~usage:Wire.usage_zero ~cost:0.0 ~latency_ms
+         ~outcome:(Printf.sprintf "http %d" status) ~detail:"");
+    Error
+      (Printf.sprintf "provider %s: http %d: %s" p.Config.name status
+         (Config.redact cfg (truncate 400 raw)))
   end
   else
     match Yojson.Safe.from_string raw with
@@ -79,8 +100,8 @@ let handle_response ~cfg ~(p : Config.provider) ~plan ~model ~task ~route ~laten
             let cost = Wire.cost_usd p response.Wire.usage in
             let outcome = match response.Wire.stop with Some s -> s | None -> "ok" in
             record cfg
-              (row ~cfg ~plan ~provider:p.Config.name ~model ~task ~route
-                 ~usage:response.Wire.usage ~cost ~latency_ms ~outcome);
+              (row ~kind:Journal.Call ~cfg ~plan ~provider:p.Config.name ~model ~task ~route
+                 ~usage:response.Wire.usage ~cost ~latency_ms ~outcome ~detail:"");
             Ok
               {
                 model;
@@ -93,13 +114,32 @@ let handle_response ~cfg ~(p : Config.provider) ~plan ~model ~task ~route ~laten
                 raw;
               })
 
-let run ~env ~sw (cfg : Config.t) ~model ~system (segs : Segments.t) ~task ~max_tokens
-    ?(tools = []) ?warm () =
+(* The streaming path: same journal row, same accounting, assembled from the
+   transcript instead of parsed from one body. *)
+let handle_stream_response ~cfg ~(p : Config.provider) ~plan ~model ~task ~route ~latency_ms
+    ~status ~raw =
+  if status < 200 || status >= 300 then
+    handle_response ~cfg ~p ~plan ~model ~task ~route ~latency_ms ~status ~raw
+  else
+    let response = Wire.assemble_stream p raw in
+    let cost = Wire.cost_usd p response.Wire.usage in
+    let outcome = match response.Wire.stop with Some s -> s | None -> "ok" in
+    record cfg
+      (row ~kind:Journal.Call ~cfg ~plan ~provider:p.Config.name ~model ~task ~route
+         ~usage:response.Wire.usage ~cost ~latency_ms ~outcome
+         ~detail:(Printf.sprintf "streamed %d bytes" (String.length raw)));
+    Ok { model; provider = p.Config.name; route; plan; response; cost_usd = cost; latency_ms; raw }
+
+let one_call ?(stream = false) ~env ~sw ~cfg ~model ~system segs ~task ~max_tokens ~tools
+    ~messages ?warm () =
   let* p, route = Config.choose cfg ?warm ~model () in
   let* key = Config.key cfg p in
   let plan = Cache_strategy.plan p segs in
+  (* the caller may pass explicit schemas; otherwise the host's own are used,
+     shaped for whichever wire the route chose *)
+  let tools = if tools = [] then Tools.schemas p.Config.wire else tools in
   let body =
-    Wire.build_request p plan ~model ~system ~messages:[] ~max_tokens ~tools
+    Wire.build_request ~stream p plan ~model ~system ~messages ~max_tokens ~tools
     |> Yojson.Safe.to_string
   in
   let url = p.Config.base_url ^ path_for p in
@@ -108,4 +148,79 @@ let run ~env ~sw (cfg : Config.t) ~model ~system (segs : Segments.t) ~task ~max_
     Http_client.request ~env ~sw ~meth:"POST" ~url ~headers:(auth_headers p key) ~body ()
   in
   let latency_ms = int_of_float ((Unix.gettimeofday () -. t0) *. 1000.0) in
-  handle_response ~cfg ~p ~plan ~model ~task ~route ~latency_ms ~status ~raw
+  if stream then handle_stream_response ~cfg ~p ~plan ~model ~task ~route ~latency_ms ~status ~raw
+  else handle_response ~cfg ~p ~plan ~model ~task ~route ~latency_ms ~status ~raw
+
+(* Every tool call gets a row, allowed or not: "keep many attempts in flight
+   and trust none of them" only works if the trust decision is recorded. *)
+let execute_calls ~env ~sw ~cfg ~authority ~grants ~plan ~provider ~model ~task ~route
+    ~ordinal_start calls =
+  let rec go i acc = function
+    | [] -> List.rev acc
+    | (c : Wire.tool_call) :: rest ->
+        let call = { Tools.prim = c.Wire.name; args = c.Wire.args } in
+        let step =
+          match Tools.dispatch ~env ~sw ~authority ~grants call with
+          | Ok result ->
+              {
+                ordinal = i;
+                prim = c.Wire.name;
+                args = c.Wire.args;
+                allowed = true;
+                result = Yojson.Safe.to_string result;
+              }
+          | Error m ->
+              { ordinal = i; prim = c.Wire.name; args = c.Wire.args; allowed = false; result = m }
+        in
+        let detail =
+          truncate 600
+            (Printf.sprintf "%s %s -> %s" step.prim (Yojson.Safe.to_string step.args)
+               (if step.allowed then step.result else "REFUSED " ^ step.result))
+        in
+        record cfg
+          (row ~kind:Journal.Tool ~cfg ~plan ~provider ~model ~task ~route
+             ~usage:Wire.usage_zero ~cost:0.0 ~latency_ms:0
+             ~outcome:(if step.allowed then "ok" else "denied") ~detail);
+        go (i + 1) (step :: acc) rest
+  in
+  go ordinal_start [] calls
+
+let results_message steps =
+  steps
+  |> List.map (fun s ->
+         if s.allowed then Printf.sprintf "tool %s -> %s" s.prim s.result
+         else Printf.sprintf "tool %s -> REFUSED: %s" s.prim s.result)
+  |> String.concat "\n"
+
+(* The bounded loop: a microturn may take up to [max_steps] model calls, and
+   stops as soon as the model stops asking for tools. *)
+let run ~env ~sw ~cfg ~authority ~grants ~model ~system segs ~task ~max_tokens
+    ?(tools = []) ?(max_steps = 3) ?(stream = false) ?warm () =
+  let rec loop n messages steps =
+    if n > max_steps then Ok { outcome = None; steps = List.rev steps; calls = n - 1 }
+    else
+      match
+        one_call ~stream ~env ~sw ~cfg ~model ~system segs ~task ~max_tokens ~tools ~messages
+          ?warm ()
+      with
+      | Error m -> Error m
+      | Ok outcome -> (
+          match outcome.response.Wire.tool_calls with
+          | [] -> Ok { outcome = Some outcome; steps = List.rev steps; calls = n }
+          | calls ->
+              let executed =
+                execute_calls ~env ~sw ~cfg ~authority ~grants ~plan:outcome.plan
+                  ~provider:outcome.provider ~model ~task ~route:outcome.route
+                  ~ordinal_start:n calls
+              in
+              let mutter = String.concat "," (List.map (fun c -> c.Wire.name) calls) in
+              let messages =
+                messages
+                @ [
+                    ("assistant", "tool calls: " ^ mutter);
+                    ("user", results_message executed);
+                  ]
+              in
+              loop (n + 1) messages (List.rev_append executed steps))
+  in
+  loop 1 [] []
