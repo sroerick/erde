@@ -1,0 +1,3 @@
+(executable
+ (name erde)
+ (libraries erde cmdliner eio eio_main yojson unix))

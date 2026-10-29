@@ -1,0 +1,60 @@
+{
+  "identity": "erde-gateway",
+  "journal": "./journal.jsonl",
+  "providers": [
+    {
+      "name": "gomodel",
+      "wire": "openai",
+      "base_url": "https://api.gomodel.example/v1",
+      "key_env": "GOMODEL_API_KEY",
+      "cache_mode": "implicit",
+      "cache_ttl_s": 1800,
+      "min_prefix_tokens": 1024,
+      "input_price": 0.6,
+      "output_price": 2.4,
+      "cache_read_mult": 0.1,
+      "live": true
+    },
+    {
+      "name": "synthetic",
+      "wire": "openai",
+      "base_url": "https://api.synthetic.example/v1",
+      "key_env": "SYNTHETIC_API_KEY",
+      "cache_mode": "implicit",
+      "cache_ttl_s": 1800,
+      "min_prefix_tokens": 1024,
+      "input_price": 1.0,
+      "output_price": 4.0,
+      "live": true
+    },
+    {
+      "name": "neuralwatt",
+      "wire": "openai",
+      "base_url": "https://api.neuralwatt.example/v1",
+      "key_env": "NEURALWATT_API_KEY",
+      "input_price": 0.4,
+      "output_price": 1.6,
+      "live": false
+    },
+    {
+      "name": "anthropic",
+      "wire": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "key_env": "ANTHROPIC_API_KEY",
+      "auth_header": "x-api-key",
+      "auth_scheme": "",
+      "cache_mode": "explicit",
+      "cache_ttl_s": 300,
+      "min_prefix_tokens": 1024,
+      "input_price": 3.0,
+      "output_price": 15.0,
+      "cache_write_mult": 1.25,
+      "cache_read_mult": 0.1,
+      "live": true
+    }
+  ],
+  "routes": [
+    { "model": "glm-5.3-flash", "candidates": ["gomodel", "synthetic", "neuralwatt"] },
+    { "model": "claude-sonnet-5.5", "candidates": ["anthropic"] }
+  ]
+}

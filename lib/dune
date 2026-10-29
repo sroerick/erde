@@ -1,0 +1,5 @@
+(library
+ (name erde)
+ (libraries eio eio_main unix tls tls-eio ca-certs-nss
+   httpun httpun-eio gluten-eio
+   yojson digestif.ocaml uri base64 fmt logs mirage-crypto-rng.unix))
