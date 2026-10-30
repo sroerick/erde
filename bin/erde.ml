@@ -243,6 +243,26 @@ let tool config prim path =
           Printf.printf "refused: %s\n" m;
           1)
 
+(* The operator's write hand for tests and standing-task edits: same grant
+   gate and chunked-claim encoding the model's tree.put goes through. *)
+let put config path text =
+  with_authority config (fun cfg auth ->
+      Eio_main.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      match
+        Tools.dispatch ~env ~sw ~authority:auth ~grants:cfg.Config.grants
+          {
+            Tools.prim = "tree.put";
+            args = `Assoc [ ("path", `String path); ("value_text", `String text) ]
+          }
+      with
+      | Ok j ->
+          Printf.printf "%s\n" (Yojson.Safe.pretty_to_string j);
+          0
+      | Error m ->
+          Printf.printf "refused: %s\n" m;
+          1)
+
 let turn config model task max_tokens max_steps warm stream claims_mode claims_limit =
   match Config.load config with
   | Error m -> prerr_endline ("erde: " ^ m); 1
@@ -405,7 +425,10 @@ let max_ticks_term =
 let task_path_term =
   Arg.(value & opt string "u.gregor.loop.task" & info [ "task-path" ] ~docv:"PATH" ~doc:"Claim holding the standing task.")
 
-let loop config model interval max_ticks task_path claims_mode claims_limit =
+let max_tokens_term =
+  Arg.(value & opt int 1024 & info [ "max-tokens" ] ~docv:"N" ~doc:"Output token ceiling per model call.")
+
+let loop config model interval max_ticks task_path loop_max_tokens claims_mode claims_limit =
   let fallback =
     "loop tick: no readable standing task at " ^ task_path
     ^ "; write a one-line status claim under u.gregor.loop.log.<epoch-utc> (tree.put value_text), then stop."
@@ -429,7 +452,7 @@ let loop config model interval max_ticks task_path claims_mode claims_limit =
       !task
     in
     Printf.printf "task %s\n" (substr task 80);
-    let _code = turn config model task 1024 6 "" false claims_mode claims_limit in
+    let _code = turn config model task loop_max_tokens 6 "" false claims_mode claims_limit in
     if n < max_ticks then (
       Printf.printf "-- sleeping %ds\n" interval;
       Unix.sleep interval)
@@ -439,9 +462,9 @@ let loop config model interval max_ticks task_path claims_mode claims_limit =
 
 let cmd_loop =
   Cmd.v (Cmd.info "loop" ~doc:"Run the standing task claim on an interval (the identity heartbeat).")
-    Term.(
-      const loop $ config_term $ model_term $ interval_term $ max_ticks_term $ task_path_term $ claims_mode_term
-      $ claims_limit_term)
+      Term.(
+        const loop $ config_term $ model_term $ interval_term $ max_ticks_term $ task_path_term $ max_tokens_term
+          $ claims_mode_term $ claims_limit_term)
 
 let et text = print_endline (Treecalc.to_ternary (Treecalc.chunked_text text)); 0
 
@@ -507,10 +530,17 @@ let cmd_verify =
   Cmd.v (Cmd.info "verify" ~doc:"Independently re-verify a claim: recompute the citation hash and decode the value.")
     Term.(const verify $ config_term $ Arg.(required & pos 0 (some string) None & info [] ~docv:"PATH"))
 
+let cmd_put =
+  Cmd.v (Cmd.info "put" ~doc:"Write a value_text claim through the same grant gate and encoding the model's tree.put uses.")
+    Term.(
+      const put $ config_term
+      $ Arg.(required & pos 0 (some string) None & info [] ~docv:"PATH")
+      $ Arg.(required & pos 1 (some string) None & info [] ~docv:"TEXT"))
+
 let () =
   exit
     (Cmd.eval'
        (Cmd.group
           (Cmd.info "erde" ~version:"0.2"
              ~doc:"Erde Lang: a substrate around tuna. One microturn, journaled, cache-aware.")
-          [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc; cmd_verify; cmd_loop; cmd_et ]))
+          [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_put; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc; cmd_verify; cmd_loop; cmd_et ]))
