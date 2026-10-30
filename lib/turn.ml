@@ -78,6 +78,11 @@ let record cfg r =
 
 let truncate n s = if String.length s <= n then s else String.sub s 0 n ^ "..."
 
+let contains_substring (s : string) (m : string) =
+  let n = String.length s and k = String.length m in
+  let rec go i = i + k <= n && ((String.sub s i k) = m || go (i + 1)) in
+  go 0
+
 (* The parsing + journalling seam, so the success path can be tested against
    a recorded body instead of a live provider. *)
 let handle_response ~cfg ~(p : Config.provider) ~plan ~model ~task ~route ~latency_ms ~status
@@ -208,8 +213,24 @@ let run ~env ~sw ~cfg ~authority ~grants ~model ~system segs ~task ~max_tokens
       | Error m -> Error m
       | Ok outcome -> (
           match outcome.response.Wire.tool_calls with
-          | [] -> Ok { outcome = Some outcome; steps = List.rev steps; calls = n }
-          | calls ->
+          | [] ->
+              (* deepseek on gomodel sometimes escapes the function-call
+                 channel and emits its raw DSML chat-template markup as text
+                 (observed: out=9..13, text is only closing tags).  That is
+                 never a real answer; bounce it back to the function channel
+                 while the step budget has room. *)
+              (match outcome.response.Wire.text with
+              | Some t when n < max_steps && contains_substring t "DSML" ->
+                  loop (n + 1)
+                    (messages
+                    @ [
+                        ("assistant", truncate 120 t);
+                        ( "user",
+                          "Your tool call arrived as raw text markup instead of a\nfunction call. Re-issue it through the function-call channel." );
+                      ])
+                    steps
+              | _ -> Ok { outcome = Some outcome; steps = List.rev steps; calls = n })
+            | calls ->
               let executed =
                 execute_calls ~env ~sw ~cfg ~authority ~grants ~plan:outcome.plan
                   ~provider:outcome.provider ~model ~task ~route:outcome.route
