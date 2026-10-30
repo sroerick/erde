@@ -1,3 +1,7 @@
 (test
  (name test_erde)
  (libraries erde alcotest eio eio_main yojson unix))
+
+(test
+ (name test_treecalc)
+ (libraries erde alcotest))

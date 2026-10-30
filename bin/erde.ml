@@ -391,10 +391,29 @@ let cmd_get =
   Cmd.v (Cmd.info "get" ~doc:"Fetch a URL and print the status (the TLS/HTTP smoke test).")
     Term.(const get $ url_term)
 
+let tc ternary =
+  match Treecalc.from_ternary ternary with
+  | Error e -> Printf.printf "error %s\n" e; 1
+  | Ok v ->
+      Printf.printf "canonical %s\n" (Treecalc.to_ternary v);
+      Printf.printf "text %s\n" (Treecalc.to_text v);
+      (match Treecalc.as_cons_text v with Some s -> Printf.printf "cons %s\n" s | None -> print_endline "cons -");
+      (match Treecalc.as_text v with Some s -> Printf.printf "chars %s\n" s | None -> print_endline "chars -");
+      (match Treecalc.eval (match v with Treecalc.T ks -> ks) with
+       | Ok (vv, steps) ->
+           Printf.printf "reduce %d steps -> %s\n" steps (Treecalc.to_ternary (Treecalc.of_kids vv));
+           (match Treecalc.as_text (Treecalc.of_kids vv) with Some s -> Printf.printf "chars-after-reduce %s\n" s | None -> ())
+       | Error e -> Printf.printf "reduce - %s\n" e);
+      0
+
+let cmd_tc =
+  Cmd.v (Cmd.info "tc" ~doc:"Decode a ternary value: canonical, text, char attempt, one full reduction.")
+    Term.(const tc $ Arg.(required & pos 0 (some string) None & info [] ~docv:"TERNARY"))
+
 let () =
   exit
     (Cmd.eval'
        (Cmd.group
           (Cmd.info "erde" ~version:"0.2"
              ~doc:"Erde Lang: a substrate around tuna. One microturn, journaled, cache-aware.")
-          [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_turn; cmd_journal; cmd_verdict; cmd_get ]))
+          [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc ]))
