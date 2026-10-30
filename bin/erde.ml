@@ -186,6 +186,15 @@ let plan config model task claims claims_mode project =
             (Wire.cost_usd p { Wire.input = 0; output = 0; cache_write = 0; cache_read = est_in });
           0)
 
+(* Claims arrive with raw ternary values; decode chunked-claim text at
+   ingest so the prompt segment carries readable content. *)
+let decode_claim (c : Segments.Claim_set.claim) : Segments.Claim_set.claim =
+  match Treecalc.from_ternary c.Segments.Claim_set.value with
+  | Ok v -> (match Treecalc.as_chunked_text v with Some s -> { c with Segments.Claim_set.value = s } | None -> c)
+  | Error _ -> c
+
+let decode_claims cs = List.map decode_claim cs
+
 let claims config prefix limit claims_mode =
   with_authority config (fun cfg auth ->
       let prefix = if prefix <> "" then prefix else cfg.Config.authority.Config.claims_prefix in
@@ -205,9 +214,9 @@ let claims config prefix limit claims_mode =
                 (substr c.Segments.Claim_set.value 22)
                 (substr c.Segments.Claim_set.source 12))
             cs;
-          let segs = segments_of ~claims:cs ~claims_mode ~project_file:None ~task:"" in
+          let segs = segments_of ~claims:(decode_claims cs) ~claims_mode ~project_file:None ~task:"" in
           print_segments segs;
-          let full = segments_of ~claims:cs ~claims_mode:"full" ~project_file:None ~task:"" in
+          let full = segments_of ~claims:(decode_claims cs) ~claims_mode:"full" ~project_file:None ~task:"" in
           let (_, _, _, full_tokens) =
             List.nth (Segments.boundaries full) (List.length (Segments.boundaries full) - 1)
           in
@@ -254,7 +263,7 @@ let turn config model task max_tokens max_steps warm stream claims_mode claims_l
             | Ok (cs, total) ->
                 Printf.printf "claims     %d of %d from %s\n" (List.length cs) total
                   cfg.Config.authority.Config.claims_prefix;
-                cs
+                decode_claims cs
             | Error m ->
                 prerr_endline
                   (Printf.sprintf "erde: claims fetch failed (%s); the identity is not optional, refusing to \
