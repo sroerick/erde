@@ -396,6 +396,59 @@ let cmd_verdict =
   Cmd.v (Cmd.info "verdict" ~doc:"Record a verdict correcting an earlier row (rows are facts, verdicts are corrections).")
     Term.(const verdict $ config_term $ ref_term $ status_term $ note_term)
 
+let interval_term =
+  Arg.(value & opt int 900 & info [ "interval" ] ~docv:"SECONDS" ~doc:"Seconds between loop ticks.")
+
+let max_ticks_term =
+  Arg.(value & opt int 3 & info [ "max-ticks" ] ~docv:"N" ~doc:"Ticks before the loop stops.")
+
+let task_path_term =
+  Arg.(value & opt string "u.gregor.loop.task" & info [ "task-path" ] ~docv:"PATH" ~doc:"Claim holding the standing task.")
+
+let loop config model interval max_ticks task_path claims_mode claims_limit =
+  let fallback =
+    "loop tick: no readable standing task at " ^ task_path
+    ^ "; write a one-line status claim under u.gregor.loop.log.<epoch-utc> (tree.put value_text), then stop."
+  in
+  for n = 1 to max_ticks do
+    Printf.printf "== tick %d/%d (%.0f)\n" n max_ticks (Unix.time ());
+    let task =
+      let task = ref fallback in
+      let _code =
+        with_authority config (fun _cfg auth ->
+            Eio_main.run @@ fun env ->
+            Eio.Switch.run @@ fun sw ->
+            match Authority.tree_get ~env ~sw auth ~path:task_path with
+            | Ok (tern, _, _) -> (
+                match Treecalc.from_ternary tern with
+                | Ok v -> task := (match Treecalc.as_chunked_text v with Some s -> s | None -> fallback)
+                | Error _ -> task := fallback);
+            0
+            | Error _ -> task := fallback; 0)
+      in
+      !task
+    in
+    Printf.printf "task %s\n" (substr task 80);
+    let _code = turn config model task 1024 6 "" false claims_mode claims_limit in
+    if n < max_ticks then (
+      Printf.printf "-- sleeping %ds\n" interval;
+      Unix.sleep interval)
+  done;
+  print_endline "loop done";
+  0
+
+let cmd_loop =
+  Cmd.v (Cmd.info "loop" ~doc:"Run the standing task claim on an interval (the identity heartbeat).")
+    Term.(
+      const loop $ config_term $ model_term $ interval_term $ max_ticks_term $ task_path_term $ claims_mode_term
+      $ claims_limit_term)
+
+let et text = print_endline (Treecalc.to_ternary (Treecalc.chunked_text text)); 0
+
+let cmd_et =
+  Cmd.v (Cmd.info "et" ~doc:"Encode text to the chunked-claim ternary (for seeding claims from a shell).")
+    Term.(const et $ Arg.(required & pos 0 (some string) None & info [] ~docv:"TEXT"))
+
 let cmd_get =
   Cmd.v (Cmd.info "get" ~doc:"Fetch a URL and print the status (the TLS/HTTP smoke test).")
     Term.(const get $ url_term)
@@ -426,4 +479,4 @@ let () =
        (Cmd.group
           (Cmd.info "erde" ~version:"0.2"
              ~doc:"Erde Lang: a substrate around tuna. One microturn, journaled, cache-aware.")
-          [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc ]))
+          [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc; cmd_loop; cmd_et ]))
