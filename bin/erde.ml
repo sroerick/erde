@@ -530,6 +530,105 @@ let cmd_verify =
   Cmd.v (Cmd.info "verify" ~doc:"Independently re-verify a claim: recompute the citation hash and decode the value.")
     Term.(const verify $ config_term $ Arg.(required & pos 0 (some string) None & info [] ~docv:"PATH"))
 
+(* Deriv receipt re-execution, run-4 verified (ENTRY-RECIPE): a deriv claim's
+   chunked text carries the program, its whole-value args, and the expected
+   result; re-execute = ONE flat-spine eval Treecalc.eval (to_kids prog @ args),
+   byte-exact against expect. Format (one token per ternary, args optional):
+     prog <canonical ternary> [args <ternary> <ternary> ...] expect <ternary> *)
+let split_ws s =
+  String.split_on_char '\n' s
+  |> List.concat_map (String.split_on_char ' ')
+  |> List.filter (fun f -> f <> "")
+
+let idx name fields =
+  let rec go i = function
+    | [] -> None
+    | h :: r -> if h = name then Some i else go (i + 1) r
+  in
+  go 0 fields
+
+let deriv config path =
+  with_authority config (fun cfg auth ->
+      ignore cfg;
+      Eio_main.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      match Authority.tree_get ~env ~sw auth ~path with
+      | Error m -> prerr_endline ("erde: " ^ m); 1
+      | Ok (tern, hash, version) ->
+          let computed = Treecalc.sha256_of_string tern in
+          Printf.printf "path        %s\n" path;
+          Printf.printf "version     %d\n" version;
+          Printf.printf "stored      %s\n" hash;
+          Printf.printf "recomputed  %s\n" computed;
+          Printf.printf "hash        %s\n"
+            (if hash = "" then "no stored hash"
+             else if hash = computed then "agree" else "MISMATCH");
+          (match Treecalc.from_ternary tern with
+           | Error e -> Printf.printf "verdict     bad value ternary (%s)\n" e; 1
+           | Ok tv -> (
+               match Treecalc.as_chunked_text tv with
+               | None -> print_endline "verdict     no deriv recipe (value is not chunked text)"; 1
+               | Some text -> (
+                   let fields = split_ws text in
+                   let after t =
+                     Option.bind (idx t fields) (fun i -> List.nth_opt fields (i + 1))
+                   in
+                   let args, expect =
+                     (match idx "args" fields with
+                      | Some i ->
+                          let j =
+                            Option.value ~default:(List.length fields) (idx "expect" fields)
+                          in
+                            (Some (List.filteri (fun k _ -> (k > i) && (k < j)) fields), after "expect")
+                      | None -> (Some [], after "expect"))
+                   in
+                   match (after "prog", args, expect) with
+                   | Some p, Some argv, Some e -> (
+                       let tern_of label s =
+                         match Treecalc.from_ternary s with
+                         | Ok v -> Ok v
+                         | Error msg ->
+                             Error
+                               (Printf.sprintf "verdict     bad %s ternary (%s)" label msg)
+                       in
+                       let ba =
+                         List.fold_left
+                           (fun acc a ->
+                             match acc with
+                             | Ok l ->
+                                 (match tern_of "arg" a with
+                                  | Ok v -> Ok (l @ [ v ])
+                                  | Error em -> Error em)
+                             | Error em -> Error em)
+                           (Ok []) argv
+                       in
+                       (match (tern_of "prog" p, ba, tern_of "expect" e) with
+                        | Ok pval, Ok avals, Ok _ ->
+                            Printf.printf "re-exec     %d arg(s), one flat-spine eval\n"
+                              (List.length avals);
+                            (match Treecalc.eval (Treecalc.to_kids pval @ avals) with
+                             | Ok (v, steps) ->
+                                 let result = Treecalc.to_ternary (Treecalc.of_kids v) in
+                                 Printf.printf "result      %s (%d steps)\n" result steps;
+                                 if result = e then (print_endline "verdict     deriv agree"; 0)
+                                 else (print_endline "verdict     deriv MISMATCH"; 1)
+                             | Error msg ->
+                                 print_endline ("verdict     re-exec failed (" ^ msg ^ ")");
+                                 1)
+                        | Error msg, _, _ | _, Error msg, _ | _, _, Error msg ->
+                            print_endline msg; 1))
+                   | _ ->
+                       print_endline
+                         "verdict     no deriv recipe (prog/expect lines missing)";
+                       1))))
+
+let cmd_deriv =
+  Cmd.v
+    (Cmd.info "deriv"
+       ~doc:
+         "Re-execute a deriv receipt claim: hash check + one flat-spine eval, \"verdict\" = verbatim output text")
+    Term.(const deriv $ config_term $ Arg.(required & pos 0 (some string) None & info [] ~docv:"PATH"))
+
 let cmd_put =
   Cmd.v (Cmd.info "put" ~doc:"Write a value_text claim through the same grant gate and encoding the model's tree.put uses.")
     Term.(
@@ -571,4 +670,4 @@ let () =
        (Cmd.group
           (Cmd.info "erde" ~version:"0.2"
              ~doc:"Erde Lang: a substrate around tuna. One microturn, journaled, cache-aware.")
-          [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_put; cmd_putr; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc; cmd_verify; cmd_loop; cmd_et ]))
+            [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_put; cmd_putr; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc; cmd_verify; cmd_deriv; cmd_loop; cmd_et ]))
