@@ -115,11 +115,36 @@ let as_cons_text (v : t) =
       Some (String.concat "" (List.map (fun n -> String.make 1 (Char.chr n)) ns))
   | _ -> None
 
+(* Chunked-claim text codec (decoded live 10-30): the value is a
+   cons-list of bit-chains; each chain is one char code, least-
+   significant bit first, high zero bits dropped (the terminator
+   leaf is indistinguishable from a trailing zero bit). *)
+let as_chunked_text (v : t) : string option =
+  let rec bits acc v =
+    match v with
+    | T [] -> Some (List.rev acc)
+    | T [ T []; rest ] -> bits (0 :: acc) rest
+    | T [ T [ T [] ]; rest ] -> bits (1 :: acc) rest
+    | _ -> None
+  in
+  let rec go chars v =
+    match v with
+    | T [] -> Some (String.concat "" (List.rev chars))
+    | T [ elem; rest ] -> (
+        match bits [] elem with
+        | Some bits -> (match bits with
+           | [] -> None
+           | bits -> go (String.make 1 (Char.chr (bval_l bits)) :: chars) rest)
+        | None -> None)
+    | _ -> None
+  and bval_l bits = List.fold_left (fun a b -> a * 2 + b) 0 (List.rev bits)
+  in go [] v
+
 (* ---------- evaluation
 
-   A spine is an application chain: a list of children whose length is the
-   arity + 2. eval returns the reduced children list (a value when its
-   length < 3) and the number of tree-calculus steps consumed. *)
+   A spine is an application chain: a list of children whose length is
+   the arity + 2. eval returns the reduced children list (a value when
+   its length < 3) and the number of tree-calculus steps consumed. *)
 
 let to_kids (T xs) = xs
 let of_kids xs = T xs

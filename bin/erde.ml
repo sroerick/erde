@@ -397,6 +397,7 @@ let tc ternary =
   | Ok v ->
       Printf.printf "canonical %s\n" (Treecalc.to_ternary v);
       Printf.printf "text %s\n" (Treecalc.to_text v);
+      (match Treecalc.as_chunked_text v with Some s -> Printf.printf "chunked %s\n" s | None -> print_endline "chunked -");
       (match Treecalc.as_cons_text v with Some s -> Printf.printf "cons %s\n" s | None -> print_endline "cons -");
       (match Treecalc.as_text v with Some s -> Printf.printf "chars %s\n" s | None -> print_endline "chars -");
       (match Treecalc.eval (match v with Treecalc.T ks -> ks) with
