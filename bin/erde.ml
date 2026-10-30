@@ -473,10 +473,44 @@ let cmd_tc =
   Cmd.v (Cmd.info "tc" ~doc:"Decode a ternary value: canonical, text, char attempt, one full reduction.")
     Term.(const tc $ Arg.(required & pos 0 (some string) None & info [] ~docv:"TERNARY"))
 
+(* The independent re-verification the harness brief promises: a claim cites a
+   hash; here we rebuild both sides locally and make the match a typed result. *)
+let verify config path =
+  with_authority config (fun cfg auth ->
+      ignore cfg;
+      Eio_main.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      match Authority.tree_get ~env ~sw auth ~path with
+      | Error m -> prerr_endline ("erde: " ^ m); 1
+      | Ok (tern, hash, version) ->
+          let computed = Treecalc.sha256_of_string tern in
+          let decode_ok =
+            match Treecalc.from_ternary tern with Ok _ -> true | Error _ -> false
+          in
+          Printf.printf "path        %s\n" path;
+          Printf.printf "version     %d\n" version;
+          Printf.printf "ternary     %d canonical digits\n" (String.length tern);
+          Printf.printf "stored      %s\n" hash;
+          Printf.printf "recomputed  %s\n" computed;
+          Printf.printf "decode      %s\n" (if decode_ok then "ok" else "FAIL");
+          if hash = "" then (
+            print_endline "verdict     no stored hash to compare";
+            1)
+          else if hash = computed && decode_ok then (
+            print_endline "verdict     agree";
+            0)
+            else (
+              print_endline "verdict     MISMATCH";
+              1))
+
+let cmd_verify =
+  Cmd.v (Cmd.info "verify" ~doc:"Independently re-verify a claim: recompute the citation hash and decode the value.")
+    Term.(const verify $ config_term $ Arg.(required & pos 0 (some string) None & info [] ~docv:"PATH"))
+
 let () =
   exit
     (Cmd.eval'
        (Cmd.group
           (Cmd.info "erde" ~version:"0.2"
              ~doc:"Erde Lang: a substrate around tuna. One microturn, journaled, cache-aware.")
-          [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc; cmd_loop; cmd_et ]))
+          [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc; cmd_verify; cmd_loop; cmd_et ]))

@@ -217,3 +217,11 @@ let eval ?(limit = default_limit) (program : t list) :
 
 (* program applied to argument: argument as the right-most child *)
 let apply program arg = eval (program @ [ arg ])
+
+(* The citation hash, reproduced locally: tuna stores the sha256 hex of the
+   value's canonical ternary string (no framing bytes).  Verify = same input,
+   same digest, compare. *)
+let sha256_of_string s =
+  let ctx = Digestif.SHA256.empty in
+  let ctx = Digestif.SHA256.feed_bytes ctx (Bytes.unsafe_of_string s) in
+  Digestif.SHA256.to_hex (Digestif.SHA256.get ctx)
