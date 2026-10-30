@@ -86,7 +86,23 @@ let dispatch ~env ~sw ~authority ~grants (c : call) =
          the gate has one path in and one path out for every tool *)
       let* _allowed = gate grants ~prim:"echo" ~path:"" in
       Ok c.args)
+  | "clock" -> (
+      (* the harness clock: no authority, no path, but still grant-gated *)
+      let* _allowed = gate grants ~prim:"clock" ~path:"" in
+      let now = Unix.time () in
+      let g = Unix.gmtime now in
+      Ok
+        (`Assoc
+          [
+            ("epoch", `Float now);
+            ( "iso",
+              `String
+                (Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02dZ" (g.Unix.tm_year + 1900)
+                    (g.Unix.tm_mon + 1) g.Unix.tm_mday g.Unix.tm_hour g.Unix.tm_min
+                    g.Unix.tm_sec));
+          ]))
   | other -> Error (Printf.sprintf "unknown prim %s" other)
+
 
 (* The schemas the model sees.  A tool the model cannot name is a tool the
    loop cannot reach, so these are part of the host, not of the caller. *)
@@ -133,4 +149,5 @@ let schemas wire =
         ("value_text", str_prop "UTF-8 text; the harness chunk-encodes it (use this OR value_ternary)")
       ]
       [ "path" ];
+    schema wire "clock" "Read the harness clock: epoch seconds and ISO-8601 UTC." [ ("format", str_prop "Optional. Only \"utc\" or \"epoch\" is accepted.") ] [];
   ]

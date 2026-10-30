@@ -483,10 +483,10 @@ let test_schemas_are_wire_shaped () =
          | _ -> None)
   in
   Alcotest.(check (list string)) "anthropic tools are flat"
-    [ "tree.get"; "tree.list"; "tree.put" ]
+    [ "tree.get"; "tree.list"; "tree.put"; "clock" ]
     (names Config.Anthropic);
   Alcotest.(check (list string)) "openai tools are function-wrapped"
-    [ "tree.get"; "tree.list"; "tree.put" ]
+    [ "tree.get"; "tree.list"; "tree.put"; "clock" ]
     (names Config.Openai)
 
 (* ---------- the tool loop records its decisions ---------- *)
