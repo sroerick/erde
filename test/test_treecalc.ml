@@ -55,6 +55,13 @@ let test_to_text () =
   (* identity renders per the text grammar: root t, stem child, leaf child *)
   Alcotest.(check string) "fork text" "t (t t) t" (Treecalc.to_text (tern "2100"))
 
+let test_chunked_roundtrip () =
+  let s = "chunked-claim format v1: slice text, 600 chars max, count on the base path." in
+  let tern = Treecalc.to_ternary (Treecalc.chunked_text s) in
+  match Treecalc.from_ternary tern with
+  | Ok v -> Alcotest.(check (option string)) "roundtrip" (Some s) (Treecalc.as_chunked_text v)
+  | Error e -> failwith e
+
 let test_as_nat () =
   Alcotest.(check (option int)) "nat 5" (Some 5) (Treecalc.as_nat (Treecalc.nat 5))
 
@@ -74,6 +81,7 @@ let () =
           Alcotest.test_case "omega trips the budget" `Quick test_omega_budget;
           Alcotest.test_case "to_text" `Quick test_to_text;
           Alcotest.test_case "as_nat" `Quick test_as_nat;
+          Alcotest.test_case "chunked roundtrip" `Quick test_chunked_roundtrip;
           Alcotest.test_case "as_text" `Quick test_as_text;
         ] );
     ]

@@ -60,8 +60,16 @@ let dispatch ~env ~sw ~authority ~grants (c : call) =
   | "tree.put" -> (
       let* path = path_required "tree.put" c.args in
       let* _allowed = gate grants ~prim:"tree.put" ~path in
-      match Config.field "value_ternary" c.args with
-      | Some (`String value) ->
+      let value =
+        match Config.field "value_ternary" c.args with
+        | Some (`String value) -> Some value
+        | _ -> (
+            match Config.field "value_text" c.args with
+            | Some (`String text) -> Some (Treecalc.to_ternary (Treecalc.chunked_text text))
+            | _ -> None)
+      in
+      match value with
+      | Some value ->
           let* hash, version =
             Authority.tree_put ~env ~sw authority ~path ~value_ternary:value
           in
@@ -72,7 +80,7 @@ let dispatch ~env ~sw ~authority ~grants (c : call) =
                 ("value_hash", `String hash);
                 ("version", `Int version);
               ])
-      | _ -> Error "tree.put: missing \"value_ternary\"")
+      | None -> Error "tree.put: missing \"value_ternary\" or \"value_text\"")
   | "echo" -> (
       (* the local sanity prim: no authority, but it still needs a grant, so
          the gate has one path in and one path out for every tool *)
@@ -118,10 +126,11 @@ let schemas wire =
       [ ("path", str_prop "Tree path, e.g. u.marin.notes") ] [ "path" ];
     schema wire "tree.list" "List the tree entries under a prefix."
       [ ("prefix", str_prop "Raw string prefix, e.g. u.marin.") ] [ "prefix" ];
-    schema wire "tree.put" "Write a canonical ternary value at a path."
+    schema wire "tree.put" "Write a value at a path (text is stored chunked-claim encoded)."
       [
         ("path", str_prop "Tree path to write");
         ("value_ternary", str_prop "Canonical ternary: 0 leaf, 1+child stem, 2+left+right fork");
+        ("value_text", str_prop "UTF-8 text; the harness chunk-encodes it (use this OR value_ternary)")
       ]
-      [ "path"; "value_ternary" ];
+      [ "path" ];
   ]

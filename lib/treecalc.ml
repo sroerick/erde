@@ -140,6 +140,23 @@ let as_chunked_text (v : t) : string option =
   and bval_l bits = List.fold_left (fun a b -> a * 2 + b) 0 (List.rev bits)
   in go [] v
 
+(* Encoder: the inverse of as_chunked_text. Each char code becomes its
+   LSB-first bit chain (high zero bits dropped, so a chain always ends
+   on a set bit and NUL has no chain); the value is a cons-list of
+   those chains, terminated by a leaf. *)
+let chunked_text (s : string) : t =
+  let bit b = if b = 0 then T [] else T [ T [] ] in
+  let char_elem code =
+    let rec chain v acc = if v = 0 then acc else chain (v / 2) (v mod 2 :: acc) in
+    (* chain yields MSB-first; fold it right so the tail is the terminator *)
+    List.fold_left (fun acc b -> T [ bit b; acc ]) (T []) (chain code [])
+  in
+  let rec cons i =
+    if i >= String.length s then T [] else T [ char_elem (Char.code s.[i]); cons (i + 1) ]
+  in
+  cons 0
+
+
 (* ---------- evaluation
 
    A spine is an application chain: a list of children whose length is
