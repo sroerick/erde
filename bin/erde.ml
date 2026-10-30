@@ -537,10 +537,38 @@ let cmd_put =
       $ Arg.(required & pos 0 (some string) None & info [] ~docv:"PATH")
       $ Arg.(required & pos 1 (some string) None & info [] ~docv:"TEXT"))
 
+(* Raw-ternary put for program artifacts: the value IS canonical ternary,
+   not text to chunk-encode. Same grant gate. *)
+let putr config path ternary =
+  with_authority config (fun cfg auth ->
+      ignore cfg;
+      Eio_main.run @@ fun env ->
+      Eio.Switch.run @@ fun sw ->
+      match
+        Tools.dispatch ~env ~sw ~authority:auth ~grants:cfg.Config.grants
+          {
+            Tools.prim = "tree.put";
+            args = `Assoc [ ("path", `String path); ("value_ternary", `String ternary) ]
+          }
+      with
+      | Ok j ->
+          Printf.printf "%s\n" (Yojson.Safe.pretty_to_string j);
+          0
+      | Error m ->
+          Printf.printf "refused: %s\n" m;
+          1)
+
+let cmd_putr =
+  Cmd.v (Cmd.info "putr" ~doc:"Write a RAW ternary claim (program artifacts): value stored as-is, same grant gate.")
+    Term.(
+      const putr $ config_term
+      $ Arg.(required & pos 0 (some string) None & info [] ~docv:"PATH")
+      $ Arg.(required & pos 1 (some string) None & info [] ~docv:"TERNARY"))
+
 let () =
   exit
     (Cmd.eval'
        (Cmd.group
           (Cmd.info "erde" ~version:"0.2"
              ~doc:"Erde Lang: a substrate around tuna. One microturn, journaled, cache-aware.")
-          [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_put; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc; cmd_verify; cmd_loop; cmd_et ]))
+          [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_put; cmd_putr; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc; cmd_verify; cmd_loop; cmd_et ]))
