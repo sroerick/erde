@@ -55,6 +55,32 @@ let read_file p =
       Ok s
   with Sys_error m -> Error ("file.read: " ^ m)
 
+(* Optional integer argument: a JSON number or a decimal string, so a model
+   that writes "offset": "1" is not refused. *)
+let arg_int name args =
+  match Config.field name args with
+  | Some (`Int n) -> Some n
+  | Some (`Float f) -> Some (int_of_float f)
+  | Some (`String s) -> (try Some (int_of_string s) with _ -> None)
+  | _ -> None
+
+(* A 1-based line window over file content. Reading a 170 KB lib file whole
+   costs ~45k tokens and buries the edit; offset/limit keep one read to the
+   part the model needs. Returns total lines, first line, count, body. *)
+let line_window content ~offset ~limit =
+  let lines = Array.of_list (String.split_on_char '\n' content) in
+  let n = Array.length lines in
+  let start = max 1 offset in
+  let count = match limit with Some l -> max 0 l | None -> n in
+  let stop = min n (start + count - 1) in
+  let body =
+    if start > n then ""
+    else
+      String.concat "\n"
+        (Array.to_list (Array.sub lines (start - 1) (stop - start + 1)))
+  in
+  (n, start, max 0 (stop - start + 1), body)
+
 let write_file p s =
   if String.length s > max_file_bytes then
     Error (Printf.sprintf "file.write: %d bytes (cap %d)" (String.length s) max_file_bytes)
@@ -232,18 +258,26 @@ let dispatch ~env ~sw ~authority ~grants (c : call) =
                 ("version", `Int version);
               ])
       | None -> Error "tree.put: missing \"value_ternary\" or \"value_text\"")
-  | "file.read" -> (
-      let* path = path_required "file.read" c.args in
-      let* real = canon_read path in
-      let* _allowed = gate grants ~prim:"file.read" ~path:real in
-      let* content = read_file real in
-      Ok
-        (`Assoc
-          [
-            ("path", `String real);
-            ("bytes", `Int (String.length content));
-            ("content", `String content);
-          ]))
+    | "file.read" -> (
+        let* path = path_required "file.read" c.args in
+        let* real = canon_read path in
+        let* _allowed = gate grants ~prim:"file.read" ~path:real in
+        let* content = read_file real in
+        let n, start, count, body =
+          line_window content
+            ~offset:(Option.value (arg_int "offset" c.args) ~default:1)
+            ~limit:(arg_int "limit" c.args)
+        in
+        Ok
+          (`Assoc
+            [
+              ("path", `String real);
+              ("bytes", `Int (String.length content));
+              ("lines", `Int n);
+              ("offset", `Int start);
+              ("limit", `Int count);
+              ("content", `String body);
+            ]))
   | "file.write" -> (
       let* path = path_required "file.write" c.args in
       let* content = arg_string "file.write" "content" c.args in
@@ -390,10 +424,19 @@ let schema wire prim description properties required =
 
 let str_prop description = `Assoc [ ("type", `String "string"); ("description", `String description) ]
 
+let int_prop description =
+  `Assoc [ ("type", `String "integer"); ("description", `String description) ]
+
 let schemas wire =
   [
-    schema wire "file.read" "Read a UTF-8 text file. Grant-gated by path prefix; 1MB cap."
-      [ ("path", str_prop "Absolute path") ] [ "path" ];
+    schema wire "file.read"
+      "Read a UTF-8 text file, or a 1-based line window of it (offset/limit). Grant-gated by path prefix; 1MB cap."
+      [
+        ("path", str_prop "Absolute path");
+        ("offset", int_prop "1-based first line to return; default 1");
+        ("limit", int_prop "How many lines to return; default reads to the end");
+      ]
+      [ "path" ];
     schema wire "file.write"
       "Write a whole text file (creates or truncates; the parent directory must exist; 1MB cap). Needs the file.write grant."
       [ ("path", str_prop "Absolute path"); ("content", str_prop "Full file content") ]

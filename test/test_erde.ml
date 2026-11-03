@@ -375,7 +375,7 @@ let test_handle_response_journals_a_failure () =
 
 (* ---------- grants ---------- *)
 
-let g id prim prefix = { Grants.id; prim; path_prefix = prefix; live = true }
+let g id prim prefix = { Grants.id; prim; path_prefix = prefix; cmd_allow = []; env = []; live = true }
 
 let ok = function Ok _ -> true | Error _ -> false
 
@@ -465,6 +465,19 @@ let test_tool_gate_passes_then_the_authority_is_reached () =
       | Ok _ -> Alcotest.fail "an unreachable authority cannot answer"
       | Error m -> Alcotest.(check bool) "not a denial" false (contains m "denied"))
 
+let test_file_read_window () =
+  let n, start, count, body = Tools.line_window "a\nb\nc\nd\n" ~offset:2 ~limit:(Some 2) in
+  Alcotest.(check int) "line count" 5 n;
+  Alcotest.(check int) "window starts at the asked line" 2 start;
+  Alcotest.(check int) "window length" 2 count;
+  Alcotest.(check string) "the window body" "b\nc" body;
+  let n, _, count, body = Tools.line_window "a\nb\nc" ~offset:9 ~limit:(Some 3) in
+  Alcotest.(check int) "the total is still known past the end" 3 n;
+  Alcotest.(check int) "no lines past the end" 0 count;
+  Alcotest.(check string) "past the end is empty" "" body;
+  Alcotest.(check (option int)) "a decimal string is an offset" (Some 2)
+    (Tools.arg_int "offset" (`Assoc [ ("offset", `String "2") ]))
+
 let test_schemas_are_wire_shaped () =
   let names wire =
     Tools.schemas wire
@@ -482,12 +495,14 @@ let test_schemas_are_wire_shaped () =
              n
          | _ -> None)
   in
-  Alcotest.(check (list string)) "anthropic tools are flat"
-    [ "tree.get"; "tree.list"; "tree.put"; "clock" ]
-    (names Config.Anthropic);
-  Alcotest.(check (list string)) "openai tools are function-wrapped"
-    [ "tree.get"; "tree.list"; "tree.put"; "clock" ]
-    (names Config.Openai)
+    Alcotest.(check (list string)) "anthropic tools are flat"
+      [ "file.read"; "file.write"; "file.patch"; "file.list"; "shell.exec";
+        "tree.get"; "tree.list"; "tree.put"; "clock" ]
+      (names Config.Anthropic);
+    Alcotest.(check (list string)) "openai tools are function-wrapped"
+      [ "file.read"; "file.write"; "file.patch"; "file.list"; "shell.exec";
+        "tree.get"; "tree.list"; "tree.put"; "clock" ]
+      (names Config.Openai)
 
 (* ---------- the tool loop records its decisions ---------- *)
 
@@ -818,7 +833,9 @@ let () =
           Alcotest.test_case "an unknown prim never runs" `Quick test_tool_unknown_prim;
           Alcotest.test_case "granted means attempted" `Quick
             test_tool_gate_passes_then_the_authority_is_reached;
-          Alcotest.test_case "schemas match the wire" `Quick test_schemas_are_wire_shaped;
+            Alcotest.test_case "schemas match the wire" `Quick test_schemas_are_wire_shaped;
+            Alcotest.test_case "a read window is 1-based and clamped" `Quick
+              test_file_read_window;
         ] );
       ( "http",
         [
