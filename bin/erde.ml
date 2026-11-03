@@ -683,10 +683,52 @@ let cmd_putr =
       $ Arg.(required & pos 0 (some string) None & info [] ~docv:"PATH")
       $ Arg.(required & pos 1 (some string) None & info [] ~docv:"TERNARY"))
 
+let exec_timeout_term =
+  Arg.(
+    value & opt int 60
+    & info [ "timeout" ] ~docv:"SECONDS" ~doc:"Seconds before SIGTERM (default 60).")
+
+let exec_args_term = Arg.(value & pos_all string [] & info [] ~docv:"CWD PROG [ARG...]")
+
+(* The operator's hand for one program: same grant gate the model's
+   shell.exec goes through, no shell, no model, no tokens. *)
+let exec config timeout items =
+  match items with
+  | cwd :: prog :: rest ->
+      with_authority config (fun cfg auth ->
+          Eio_main.run @@ fun env ->
+          Eio.Switch.run @@ fun sw ->
+          let args =
+            `Assoc
+              [
+                ("cwd", `String cwd);
+                ("argv", `List (List.map (fun s -> `String s) (prog :: rest)));
+                ("timeout_s", `Int timeout);
+              ]
+          in
+          match
+            Tools.dispatch ~env ~sw ~authority:auth ~grants:cfg.Config.grants
+              { Tools.prim = "shell.exec"; args }
+          with
+          | Ok j ->
+              Printf.printf "%s\n" (Yojson.Safe.pretty_to_string j);
+              0
+          | Error m ->
+              Printf.printf "refused: %s\n" m;
+              1)
+  | _ ->
+      prerr_endline "erde exec: need <cwd> <prog> [args...]";
+      1
+
+let cmd_exec =
+  Cmd.v
+    (Cmd.info "exec" ~doc:"Run one program through the shell.exec grant (dry: no model, no tokens).")
+    Term.(const exec $ config_term $ exec_timeout_term $ exec_args_term)
+
 let () =
   exit
     (Cmd.eval'
        (Cmd.group
           (Cmd.info "erde" ~version:"0.2"
              ~doc:"Erde Lang: a substrate around tuna. One microturn, journaled, cache-aware.")
-            [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_put; cmd_putr; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc; cmd_verify; cmd_deriv; cmd_loop; cmd_et ]))
+              [ cmd_providers; cmd_plan; cmd_claims; cmd_tool; cmd_exec; cmd_put; cmd_putr; cmd_turn; cmd_journal; cmd_verdict; cmd_get; cmd_tc; cmd_verify; cmd_deriv; cmd_loop; cmd_et ]))

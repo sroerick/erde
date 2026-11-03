@@ -92,6 +92,86 @@ let arg_string prim name args =
   | Some (`String s) -> Ok s
   | _ -> Error (Printf.sprintf "%s: missing \"%s\"" prim name)
 
+(* ---------- shell.exec: one program, no shell ----------
+
+   argv is exec'd verbatim; no shell ever parses it. cwd is canonicalised and
+grant-checked like any other path, argv[0] must be absolute and listed in the
+grant's cmd_allow, and the grant's env is laid over the inherited one (the
+opam switch needs PATH and OCAMLLIB to find ocamlc). Each stream is capped so
+a noisy build cannot flood the transcript. *)
+
+let max_exec_bytes = 65_536
+let max_exec_timeout = 600
+
+let read_capped_file p =
+  try
+    let ic = open_in_bin p in
+    let n = min (in_channel_length ic) max_exec_bytes in
+    let s = really_input_string ic n in
+    close_in ic;
+    s
+  with Sys_error _ -> ""
+
+let env_put env k v =
+  let pref = k ^ "=" in
+  let keep e = not (Grants.starts_with ~prefix:pref e) in
+  (pref ^ v) :: List.filter keep env
+
+let shell_exec ~argv ~cwd ~timeout_s ~extra_env =
+  let out = Filename.temp_file "erde-exec-out" ".log" in
+  let err = Filename.temp_file "erde-exec-err" ".log" in
+  let child_env =
+    Array.of_list
+      (List.fold_left
+         (fun acc (k, v) -> env_put acc k v)
+         (Array.to_list (Unix.environment ())) extra_env)
+  in
+  let fd_out = Unix.openfile out [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
+  let fd_err = Unix.openfile err [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
+  let started = Unix.gettimeofday () in
+  let pid =
+    match Unix.fork () with
+    | 0 ->
+        (try Unix.chdir cwd with _ -> ());
+        (try Unix.dup2 fd_out Unix.stdout with _ -> ());
+        (try Unix.dup2 fd_err Unix.stderr with _ -> ());
+        (try Unix.execve argv.(0) argv child_env with _ -> ());
+        exit 127
+    | pid -> pid
+  in
+  Unix.close fd_out;
+  Unix.close fd_err;
+  let deadline = started +. float_of_int timeout_s in
+  let poll () = match Unix.waitpid [ Unix.WNOHANG ] pid with 0, _ -> None | _, st -> Some st in
+  let rec loop () =
+    match poll () with
+    | Some st -> (Some st, false)
+    | None ->
+        if Unix.gettimeofday () >= deadline then (
+          (try Unix.kill pid Sys.sigterm with _ -> ());
+          Unix.sleepf 0.2;
+          match poll () with
+          | Some st -> (Some st, true)
+          | None ->
+              (try Unix.kill pid Sys.sigkill with _ -> ());
+              ((try Some (snd (Unix.waitpid [] pid)) with _ -> None), true))
+        else (
+          Unix.sleepf 0.05;
+          loop ())
+  in
+  let status, timed_out = loop () in
+  let stdout = read_capped_file out and stderr = read_capped_file err in
+  (try Sys.remove out with _ -> ());
+  (try Sys.remove err with _ -> ());
+  let code =
+    match status with
+    | Some (Unix.WEXITED n) -> n
+    | Some (Unix.WSIGNALED n) -> 128 + n
+    | Some (Unix.WSTOPPED n) -> 128 + n
+    | None -> -1
+  in
+  let ms = int_of_float ((Unix.gettimeofday () -. started) *. 1000.) in
+  (code, stdout, stderr, timed_out, ms)
 let dispatch ~env ~sw ~authority ~grants (c : call) =
   match c.prim with
   | "tree.get" -> (
@@ -212,6 +292,49 @@ let dispatch ~env ~sw ~authority ~grants (c : call) =
                   ("path", `String real);
                   ("entries", `List (List.map (fun s -> `String s) (List.sort compare names)));
                 ]))
+  | "shell.exec" -> (
+      let* cwd = arg_string "shell.exec" "cwd" c.args in
+      let* real = canon_read cwd in
+      if not (Sys.file_exists real && Sys.is_directory real) then
+        Error ("shell.exec: " ^ real ^ " is not a directory")
+      else
+        let* argv =
+          match Config.field "argv" c.args with
+          | Some (`List xs) -> (
+              match List.filter_map (function `String s -> Some s | _ -> None) xs with
+              | [] -> Error "shell.exec: \"argv\" must be a non-empty array of strings"
+              | parts -> Ok (Array.of_list parts))
+          | _ -> Error "shell.exec: missing \"argv\" (array of strings)"
+        in
+        let timeout_s =
+          match Config.field "timeout_s" c.args with
+          | Some (`Int n) -> max 1 (min n max_exec_timeout)
+          | _ -> 60
+        in
+          (* grants name directories with a trailing slash; the canonical
+             cwd has none, so check it the way file.list does *)
+          let* allowed = gate grants ~prim:"shell.exec" ~path:(real ^ "/") in
+        let prog = argv.(0) in
+        if Filename.is_relative prog then
+          Error ("shell.exec: argv[0] must be an absolute path, got " ^ prog)
+        else if not (List.mem prog allowed.Grants.cmd_allow) then
+          Error
+            (Printf.sprintf "shell.exec: %s is not in this grant's cmd_allow (%s)" prog
+               (String.concat "," allowed.Grants.cmd_allow))
+        else
+          let code, stdout, stderr, timed_out, ms =
+            shell_exec ~argv ~cwd:real ~timeout_s ~extra_env:allowed.Grants.env
+          in
+          Ok
+            (`Assoc
+              [
+                ("cwd", `String real);
+                ("exit", `Int code);
+                ("timed_out", `Bool timed_out);
+                ("ms", `Int ms);
+                ("stdout", `String stdout);
+                ("stderr", `String stderr);
+              ]))
   | "echo" -> (
       (* the local sanity prim: no authority, but it still needs a grant, so
          the gate has one path in and one path out for every tool *)
@@ -285,6 +408,27 @@ let schemas wire =
       [ "path"; "old"; "new" ];
     schema wire "file.list" "List a directory's entries, sorted."
       [ ("path", str_prop "Absolute directory path") ] [ "path" ];
+    schema wire "shell.exec"
+      "Run one program with no shell: argv is exec'd verbatim in cwd with a timeout. argv[0] must be absolute and listed in the grant's cmd_allow; the grant supplies PATH and OCAMLLIB. Each stream is capped at 64KB."
+      [
+        ( "argv",
+          `Assoc
+            [
+              ("type", `String "array");
+              ("items", `Assoc [ ("type", `String "string") ]);
+              ( "description",
+                `String
+                  "Program and arguments, e.g. [\"/home/al/.opam/poohstack/bin/dune\",\"build\"]" );
+            ] );
+        ("cwd", str_prop "Absolute working directory inside a granted prefix");
+        ( "timeout_s",
+          `Assoc
+            [
+              ("type", `String "integer");
+              ("description", `String "Seconds before SIGTERM (default 60, max 600)");
+            ] );
+      ]
+      [ "argv"; "cwd" ];
     schema wire "tree.get" "Read the canonical ternary value at a tree path."
       [ ("path", str_prop "Tree path, e.g. u.marin.notes") ] [ "path" ];
     schema wire "tree.list" "List the tree entries under a prefix."

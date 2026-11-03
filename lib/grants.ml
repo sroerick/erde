@@ -16,6 +16,8 @@ type row = {
   id : string;
   prim : string;                 (* "tree.get", "tree.list", "tree.put", ... *)
   path_prefix : string option;   (* None = unscoped: covers every path *)
+  cmd_allow : string list;       (* shell.exec: absolute argv[0] values this grant may run *)
+  env : (string * string) list;  (* shell.exec: variables laid over the inherited env *)
   live : bool;
 }
 
@@ -54,6 +56,17 @@ let str_opt name j = match field name j with Some (`String s) -> Some s | _ -> N
 let str name j = match str_opt name j with Some s -> s | None -> ""
 let bool_or name d j = match field name j with Some (`Bool b) -> b | _ -> d
 
+let str_list name j =
+  match field name j with
+  | Some (`List xs) -> List.filter_map (function `String s -> Some s | _ -> None) xs
+  | _ -> []
+
+let str_assoc name j =
+  match field name j with
+  | Some (`Assoc kvs) ->
+      List.filter_map (function k, `String v -> Some (k, v) | _ -> None) kvs
+  | _ -> []
+
 let of_json j : (row, string) result =
   match (str_opt "prim" j, field "id" j) with
   | Some prim, Some (`String id) ->
@@ -62,8 +75,10 @@ let of_json j : (row, string) result =
           id;
           prim;
           path_prefix = str_opt "path_prefix" j;
+          cmd_allow = str_list "cmd_allow" j;
+          env = str_assoc "env" j;
           live = bool_or "live" true j;
-          }
+        }
   | _ -> Error "grant needs \"id\" and \"prim\""
 
 (* GET /api/grants/:id answers {"grant": {...}, "lineage": [...], ...}. *)
