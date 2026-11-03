@@ -72,6 +72,7 @@ dune build && dune runtest
 E=_build/default/bin/erde.exe
 $E providers -c erde.json                       # providers, routes, authority, grants
 $E plan -c erde.json -m glm-5.3-flash -t "..."  # dry run: segments, prefix hash, cache plan, route
+$E plan -c erde.json -t "..." --policy FILE     # same, with the framework segment read from FILE
 $E tool -c erde.json tree.list u.marin.         # one gated tool call, no model
 $E claims -c erde.json                          # an identity's claims, rendered into segments
 $E turn -c erde.json -m claude-sonnet-5.5 -t "..." --max-steps 3
@@ -85,7 +86,7 @@ env file, the process environment, or a mode-600 file of your own.
 
 ## Verified
 
-- 38 alcotest cases, `dune build` green.
+- 43 alcotest cases, `dune build` green.
 - Live HTTPS GET to `api.openai.com/v1/models` returns 401 with the
   provider's JSON error body.
 - Live POST to `api.anthropic.com` with a deliberately bad key returns 401 and

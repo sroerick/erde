@@ -80,16 +80,29 @@ let claims_mode_term =
         ~docv:"MODE"
         ~doc:"full | cited | truncN (cited keeps the prefix small: the value stays a tree.get away)")
 
-let segments_of ~claims ~claims_mode ~project_file ~task =
+let policy_file_term =
+  Arg.(
+    value
+    & opt (some string) None
+    & info [ "policy" ] ~docv:"FILE"
+        ~doc:
+            "Read the framework/policy segment from FILE (default: the built-in policy-v1).")
+
+let segments_of ~policy_file ~claims ~claims_mode ~project_file ~task =
   let project =
     match project_file with
     | None -> ""
     | Some f -> ( match Config.read_file f with Ok s -> s | Error m -> failwith m)
   in
+  let policy =
+    match policy_file with
+    | None -> None
+    | Some f -> ( match Config.read_file f with Ok s -> Some s | Error m -> failwith m)
+  in
   let mode =
     match Prompt.parse_claims_mode claims_mode with Ok m -> m | Error m -> failwith m
   in
-  match Prompt.default ~project ~claims ~claims_mode:mode ~task () with
+  match Prompt.default ?policy ~project ~claims ~claims_mode:mode ~task () with
   | Ok t -> t
   | Error m -> failwith m
 
@@ -161,11 +174,11 @@ let providers config =
         cfg.Config.grants;
       0
 
-let plan config model task claims claims_mode project =
+let plan config model task claims claims_mode project policy =
   match Config.load config with
   | Error m -> prerr_endline ("erde: " ^ m); 1
   | Ok cfg -> (
-      let segs = segments_of ~claims:(claims_of_file claims) ~claims_mode ~project_file:project ~task in
+      let segs = segments_of ~policy_file:policy ~claims:(claims_of_file claims) ~claims_mode ~project_file:project ~task in
       print_segments segs;
       let model = if model <> "" then model else match first_route_model cfg with Some m -> m | None -> "" in
       match Config.choose cfg ~model () with
@@ -195,7 +208,7 @@ let decode_claim (c : Segments.Claim_set.claim) : Segments.Claim_set.claim =
 
 let decode_claims cs = List.map decode_claim cs
 
-let claims config prefix limit claims_mode =
+let claims config prefix limit claims_mode policy =
   with_authority config (fun cfg auth ->
       let prefix = if prefix <> "" then prefix else cfg.Config.authority.Config.claims_prefix in
       Eio_main.run @@ fun env ->
@@ -214,9 +227,9 @@ let claims config prefix limit claims_mode =
                 (substr c.Segments.Claim_set.value 22)
                 (substr c.Segments.Claim_set.source 12))
             cs;
-          let segs = segments_of ~claims:(decode_claims cs) ~claims_mode ~project_file:None ~task:"" in
+          let segs = segments_of ~policy_file:policy ~claims:(decode_claims cs) ~claims_mode ~project_file:None ~task:"" in
           print_segments segs;
-          let full = segments_of ~claims:(decode_claims cs) ~claims_mode:"full" ~project_file:None ~task:"" in
+          let full = segments_of ~policy_file:policy ~claims:(decode_claims cs) ~claims_mode:"full" ~project_file:None ~task:"" in
           let (_, _, _, full_tokens) =
             List.nth (Segments.boundaries full) (List.length (Segments.boundaries full) - 1)
           in
@@ -282,7 +295,7 @@ let put config path text =
           Printf.printf "refused: %s\n" m;
           1)
 
-let turn config model task max_tokens max_steps warm stream claims_mode claims_limit =
+let turn config model task max_tokens max_steps warm stream claims_mode claims_limit policy_file =
   match Config.load config with
   | Error m -> prerr_endline ("erde: " ^ m); 1
   | Ok cfg -> (
@@ -309,7 +322,7 @@ let turn config model task max_tokens max_steps warm stream claims_mode claims_l
                                    run anonymous" m);
                 exit 1
           in
-          let segs = segments_of ~claims ~claims_mode ~project_file:None ~task in
+          let segs = segments_of ~policy_file ~claims ~claims_mode ~project_file:None ~task in
           print_segments segs;
           let model =
             if model <> "" then model
@@ -412,11 +425,11 @@ let cmd_providers = Cmd.v (Cmd.info "providers" ~doc:"List providers, routes, au
 
 let cmd_plan =
   Cmd.v (Cmd.info "plan" ~doc:"Dry run: segments, prefix hash, cache plan, routing. Spends nothing.")
-    Term.(const plan $ config_term $ model_term $ task_term $ claims_term $ claims_mode_term $ project_term)
+    Term.(const plan $ config_term $ model_term $ task_term $ claims_term $ claims_mode_term $ project_term $ policy_file_term)
 
 let cmd_claims =
   Cmd.v (Cmd.info "claims" ~doc:"Fetch an identity's claims from tuna and render them into segments.")
-    Term.(const claims $ config_term $ prefix_term $ limit_term $ claims_mode_term)
+    Term.(const claims $ config_term $ prefix_term $ limit_term $ claims_mode_term $ policy_file_term)
 
 let cmd_tool =
   Cmd.v (Cmd.info "tool" ~doc:"Call one tool through the grant gate (dry: no model, no tokens).")
@@ -426,7 +439,7 @@ let cmd_turn =
   Cmd.v (Cmd.info "turn" ~doc:"Run one microturn (bounded tool loop) and journal every step.")
     Term.(
       const turn $ config_term $ model_term $ task_term $ max_tokens_term $ max_steps_term $ warm_term
-      $ stream_term $ claims_mode_term $ claims_limit_term)
+      $ stream_term $ claims_mode_term $ claims_limit_term $ policy_file_term)
 
 let cmd_journal = Cmd.v (Cmd.info "journal" ~doc:"Tail the journal and print the cache hit rates.")
     Term.(const journal $ config_term $ n_term)
@@ -447,7 +460,7 @@ let task_path_term =
 let max_tokens_term =
   Arg.(value & opt int 1024 & info [ "max-tokens" ] ~docv:"N" ~doc:"Output token ceiling per model call.")
 
-let loop config model interval max_ticks task_path loop_max_tokens claims_mode claims_limit =
+let loop config model interval max_ticks task_path loop_max_tokens claims_mode claims_limit policy_file =
   let fallback =
     "loop tick: no readable standing task at " ^ task_path
     ^ "; write a one-line status claim under u.gregor.loop.log.<epoch-utc> (tree.put value_text), then stop."
@@ -471,7 +484,7 @@ let loop config model interval max_ticks task_path loop_max_tokens claims_mode c
       !task
     in
     Printf.printf "task %s\n" (substr task 80);
-    let _code = turn config model task loop_max_tokens 6 "" false claims_mode claims_limit in
+      let _code = turn config model task loop_max_tokens 6 "" false claims_mode claims_limit policy_file in
     if n < max_ticks then (
       Printf.printf "-- sleeping %ds\n" interval;
       Unix.sleep interval)
@@ -482,8 +495,8 @@ let loop config model interval max_ticks task_path loop_max_tokens claims_mode c
 let cmd_loop =
   Cmd.v (Cmd.info "loop" ~doc:"Run the standing task claim on an interval (the identity heartbeat).")
       Term.(
-        const loop $ config_term $ model_term $ interval_term $ max_ticks_term $ task_path_term $ max_tokens_term
-          $ claims_mode_term $ claims_limit_term)
+          const loop $ config_term $ model_term $ interval_term $ max_ticks_term $ task_path_term $ max_tokens_term
+            $ claims_mode_term $ claims_limit_term $ policy_file_term)
 
 let et text = print_endline (Treecalc.to_ternary (Treecalc.chunked_text text)); 0
 

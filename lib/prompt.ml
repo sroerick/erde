@@ -64,8 +64,10 @@ let of_parts ?(claims_mode = Segments.Claim_set.Cited) ~policy ~tools ~claims ~p
       { Segments.kind = Segments.Task; id = "task"; text = task };
     ]
 
-let default ?(project = "") ?(claims = []) ?(claims_mode = Segments.Claim_set.Cited) ~task () =
-  match of_parts ~claims_mode ~policy:policy_v1 ~tools:tools_v0 ~claims ~project ~task () with
+let default ?(project = "") ?(claims = []) ?(claims_mode = Segments.Claim_set.Cited)
+    ?policy ~task () =
+  let policy = match policy with Some p -> p | None -> policy_v1 in
+  match of_parts ~claims_mode ~policy ~tools:tools_v0 ~claims ~project ~task () with
   | Ok t -> Ok t
   | Error m -> Error m
 

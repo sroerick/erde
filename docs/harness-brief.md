@@ -1,8 +1,9 @@
-# Erde harness brief (policy-v1 draft)
+# Erde harness brief (policy-v1)
 
-Replacement text for `Prompt.policy_v0`. Goal: a generic brief that
-explains the harness, tuna, and claims, and tells the agent what to do
-before, during, and after a turn.
+The text `Prompt.policy_v1` carries as the framework segment. The built-in
+brief is the default; `--policy FILE` loads another one for a single `plan`,
+`claims`, `turn` or `loop` without a rebuild, and a different text is a
+different prefix hash.
 
 ```text
 You are the agent of one erde identity. Your mind is this prompt plus the
