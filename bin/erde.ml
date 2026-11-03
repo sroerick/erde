@@ -225,15 +225,34 @@ let claims config prefix limit claims_mode =
             (if Segments.tokens segs = 0 then 0 else full_tokens / Segments.tokens segs);
           0)
 
-let tool config prim path =
+let arg_term =
+  Arg.(
+    value & opt_all string []
+    & info [ "arg" ] ~docv:"K=V"
+      ~doc:"Tool argument, repeatable (dry `tool` calls only, e.g. --arg content=hi).")
+
+let tool config prim path extra =
   with_authority config (fun cfg auth ->
       Eio_main.run @@ fun env ->
       Eio.Switch.run @@ fun sw ->
       let args =
-        if path = None then `Assoc []
-        else
-          let p = Option.get path in
-          `Assoc [ ((if prim = "tree.list" then "prefix" else "path"), `String p) ]
+        let base =
+          match path with
+          | None -> []
+          | Some p -> [ ((if prim = "tree.list" then "prefix" else "path"), `String p) ]
+        in
+        let extra =
+          List.filter_map
+            (fun kv ->
+              match String.index_opt kv '=' with
+              | None -> None
+              | Some i ->
+                  Some
+                    ( String.sub kv 0 i,
+                      `String (String.sub kv (i + 1) (String.length kv - i - 1)) ))
+            extra
+        in
+        `Assoc (base @ extra)
       in
       match Tools.dispatch ~env ~sw ~authority:auth ~grants:cfg.Config.grants { Tools.prim; args } with
       | Ok j ->
@@ -401,7 +420,7 @@ let cmd_claims =
 
 let cmd_tool =
   Cmd.v (Cmd.info "tool" ~doc:"Call one tool through the grant gate (dry: no model, no tokens).")
-    Term.(const tool $ config_term $ prim_term $ path_term)
+    Term.(const tool $ config_term $ prim_term $ path_term $ arg_term)
 
 let cmd_turn =
   Cmd.v (Cmd.info "turn" ~doc:"Run one microturn (bounded tool loop) and journal every step.")

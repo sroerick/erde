@@ -20,6 +20,77 @@ let gate grants ~prim ~path =
   match Grants.check grants ~prim ~path with
   | Ok row -> Ok row
   | Error m -> Error ("denied: " ^ m)
+(* ---------- file tools: local hands, grant-gated by path ----------
+
+   Same discipline as the tree ops: the grant is checked before the file is
+touched, a refusal is an Error the caller journals, and nothing here builds
+a shell string. Paths are canonicalised first, so "../" cannot walk a call
+outside a granted prefix. Writes are capped so one turn cannot paste a
+megabyte into the transcript. *)
+
+let max_file_bytes = 1_048_576
+
+let canon_read p =
+  try Ok (Unix.realpath p)
+  with Unix.Unix_error (e, _, _) -> Error (Printf.sprintf "file: %s: %s" p (Unix.error_message e))
+
+(* A write target need not exist yet: canonicalise the parent, keep the name. *)
+let canon_write p =
+  let parent = Filename.dirname p in
+  let name = Filename.basename p in
+  try Ok (Filename.concat (Unix.realpath parent) name)
+  with Unix.Unix_error (e, _, _) ->
+    Error (Printf.sprintf "file: %s: %s" parent (Unix.error_message e))
+
+let read_file p =
+  try
+    let ic = open_in_bin p in
+    let n = in_channel_length ic in
+    if n > max_file_bytes then (
+      close_in ic;
+      Error (Printf.sprintf "file.read: %s is %d bytes (cap %d)" p n max_file_bytes))
+    else
+      let s = really_input_string ic n in
+      close_in ic;
+      Ok s
+  with Sys_error m -> Error ("file.read: " ^ m)
+
+let write_file p s =
+  if String.length s > max_file_bytes then
+    Error (Printf.sprintf "file.write: %d bytes (cap %d)" (String.length s) max_file_bytes)
+  else
+    try
+      let oc = open_out_bin p in
+      output_string oc s;
+      close_out oc;
+      Ok ()
+    with Sys_error m -> Error ("file.write: " ^ m)
+
+let count_literal hay needle =
+  let nl = String.length needle in
+  let hl = String.length hay in
+  if nl = 0 then 0
+  else
+    let rec go i acc =
+      if i + nl > hl then acc
+      else if String.sub hay i nl = needle then go (i + nl) (acc + 1)
+      else go (i + 1) acc
+    in
+    go 0 0
+
+let index_of hay needle =
+  let nl = String.length needle in
+  let rec go i =
+    if i + nl > String.length hay then None
+    else if String.sub hay i nl = needle then Some i
+    else go (i + 1)
+  in
+  go 0
+
+let arg_string prim name args =
+  match Config.field name args with
+  | Some (`String s) -> Ok s
+  | _ -> Error (Printf.sprintf "%s: missing \"%s\"" prim name)
 
 let dispatch ~env ~sw ~authority ~grants (c : call) =
   match c.prim with
@@ -81,6 +152,66 @@ let dispatch ~env ~sw ~authority ~grants (c : call) =
                 ("version", `Int version);
               ])
       | None -> Error "tree.put: missing \"value_ternary\" or \"value_text\"")
+  | "file.read" -> (
+      let* path = path_required "file.read" c.args in
+      let* real = canon_read path in
+      let* _allowed = gate grants ~prim:"file.read" ~path:real in
+      let* content = read_file real in
+      Ok
+        (`Assoc
+          [
+            ("path", `String real);
+            ("bytes", `Int (String.length content));
+            ("content", `String content);
+          ]))
+  | "file.write" -> (
+      let* path = path_required "file.write" c.args in
+      let* content = arg_string "file.write" "content" c.args in
+      let* real = canon_write path in
+      let* _allowed = gate grants ~prim:"file.write" ~path:real in
+      let* () = write_file real content in
+      Ok (`Assoc [ ("path", `String real); ("bytes", `Int (String.length content)) ]))
+  | "file.patch" -> (
+      (* a patch is a write: it needs the file.write grant on the target path *)
+      let* path = path_required "file.patch" c.args in
+      let* old_s = arg_string "file.patch" "old" c.args in
+      let* new_s = arg_string "file.patch" "new" c.args in
+      let* real = canon_read path in
+      let* _allowed = gate grants ~prim:"file.write" ~path:real in
+      let* hay = read_file real in
+      let n = count_literal hay old_s in
+      if n <> 1 then
+        Error
+          (Printf.sprintf "file.patch: the old literal occurs %d times (exactly 1 required)" n)
+      else
+        match index_of hay old_s with
+        | None -> Error "file.patch: literal vanished between count and replace"
+        | Some i ->
+            let ol = String.length old_s in
+            let out =
+              String.sub hay 0 i ^ new_s
+              ^ String.sub hay (i + ol) (String.length hay - i - ol)
+            in
+            let* () = write_file real out in
+            Ok (`Assoc [ ("path", `String real); ("replaced", `Int 1) ]))
+  | "file.list" -> (
+      let* path = path_required "file.list" c.args in
+      let* real = canon_read path in
+      (* a directory is granted as a prefix, so check it with the trailing
+         slash the grant table uses: "/x/wt/" covers listing "/x/wt" *)
+      let* _allowed = gate grants ~prim:"file.list" ~path:(real ^ "/") in
+        match
+          try Ok (Array.to_list (Sys.readdir real)) with
+          | Sys_error m -> Error ("file.list: " ^ m)
+        with
+        | Error m -> Error m
+        | Ok names ->
+            Ok
+              (`Assoc
+                [
+                  ("path", `String real);
+                  ("entries", `List (List.map (fun s -> `String s) (List.sort compare names)));
+                ]))
   | "echo" -> (
       (* the local sanity prim: no authority, but it still needs a grant, so
          the gate has one path in and one path out for every tool *)
@@ -138,6 +269,22 @@ let str_prop description = `Assoc [ ("type", `String "string"); ("description", 
 
 let schemas wire =
   [
+    schema wire "file.read" "Read a UTF-8 text file. Grant-gated by path prefix; 1MB cap."
+      [ ("path", str_prop "Absolute path") ] [ "path" ];
+    schema wire "file.write"
+      "Write a whole text file (creates or truncates; the parent directory must exist; 1MB cap). Needs the file.write grant."
+      [ ("path", str_prop "Absolute path"); ("content", str_prop "Full file content") ]
+      [ "path"; "content" ];
+    schema wire "file.patch"
+      "Replace exactly one literal occurrence in a text file; fails unless the old literal occurs exactly once. Needs the file.write grant."
+      [
+        ("path", str_prop "Absolute path");
+        ("old", str_prop "Exact literal to replace");
+        ("new", str_prop "Replacement literal");
+      ]
+      [ "path"; "old"; "new" ];
+    schema wire "file.list" "List a directory's entries, sorted."
+      [ ("path", str_prop "Absolute directory path") ] [ "path" ];
     schema wire "tree.get" "Read the canonical ternary value at a tree path."
       [ ("path", str_prop "Tree path, e.g. u.marin.notes") ] [ "path" ];
     schema wire "tree.list" "List the tree entries under a prefix."
