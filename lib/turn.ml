@@ -151,9 +151,12 @@ let one_call ?(stream = false) ~env ~sw ~cfg ~model ~system segs ~task ~max_toke
   in
   let url = p.Config.base_url ^ p.Config.path in
   let t0 = Unix.gettimeofday () in
-  let* status, raw =
-    Http_client.request ~env ~sw ~meth:"POST" ~url ~headers:(auth_headers p key) ~body ()
-  in
+    let* status, raw =
+      Retry.request ~clock:(Eio.Stdenv.clock env)
+        ~label:(Printf.sprintf "%s %s" p.Config.name model)
+        (fun () ->
+          Http_client.request ~env ~sw ~meth:"POST" ~url ~headers:(auth_headers p key) ~body ())
+    in
   let latency_ms = int_of_float ((Unix.gettimeofday () -. t0) *. 1000.0) in
   if stream then handle_stream_response ~cfg ~p ~plan ~model ~task ~route ~latency_ms ~status ~raw
   else handle_response ~cfg ~p ~plan ~model ~task ~route ~latency_ms ~status ~raw

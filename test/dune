@@ -5,3 +5,7 @@
 (test
  (name test_treecalc)
  (libraries erde alcotest))
+
+(test
+ (name test_retry)
+ (libraries erde alcotest eio eio_main))
